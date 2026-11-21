@@ -2149,5 +2149,11 @@
  "10ef9c03": "A WSL, Windows escriu un fitxer \"Zone.Identifier\" separat al costat d'un fitxer baixat d'internet. Quan està activat, la còpia l'elimina.",
  "31d132e2": "Mostra l'espai de les unitats en xifres",
  "04339c77": "Espai utilitzat i total sota la barra de cada unitat",
+ "f6bca4e8": "Deixa d'obrir sempre aquí per a:",
+ "a6a39e94": "Obre sempre en aquesta carpeta per a:",
+ "6ff5ec59": "La seva finestra Obre / Desa s'obre sempre a:",
+ "b79ebd26": "Omple la llista columna per columna",
+ "c9f22cd9": "El camí de la carpeta a les pestanyes",
+ "b47392d6": "Les pestanyes mostren el camí complet de la carpeta en lletra més petita en lloc del nom; el que no hi cap es retalla al final.",
  "bd479de9": "Aspecte de l’Explorador de fitxers del Windows"
 }

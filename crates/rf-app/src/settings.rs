@@ -531,6 +531,10 @@ pub struct Settings {
     /// Custom shortcuts: keystroke → action, e.g. `"ctrl-k" = "NewFolder"` (names as in the
     /// command palette's actions; `rustyfiles::` prefix optional). Applied at startup.
     pub keybindings: std::collections::BTreeMap<String, String>,
+    /// The folder an app's Open / Save window always starts in, whatever folder the app asks for: the app's program name in lower
+    /// case ("firefox.exe") to the folder. Set and cleared with the pin button of the dialog itself; listed in Settings › Advanced.
+    /// A user on Discord, 2026-11-21: "per program default ... Say I use firefox ... open default storage location where i set it".
+    pub dialog_folders: std::collections::BTreeMap<String, String>,
     /// Last window placement: [x, y, width, height, maximized (0/1)].
     pub window: Option<[f32; 5]>,
     /// Display UUID and the normal window's origin relative to that display.
@@ -616,6 +620,10 @@ pub struct Settings {
     pub select_on_hover: bool,
     /// Each tab as wide as its name (within the usual limits) instead of all tabs equally wide. Issue 119.
     pub tabs_fit_names: bool,
+    /// The List layout fills each column from top to bottom and scrolls sideways, as Explorer's List does (issue 170).
+    pub list_columns_first: bool,
+    /// A folder's tab shows its whole path (smaller, cut at the end) instead of its name (issue 162).
+    pub tab_shows_path: bool,
     /// The terminal button on each folder's tab. Issue 119: it was in the way of clicks on narrow tabs.
     pub tab_terminal_button: bool,
     /// Typing in a folder's list filters it by name (the filter bar opens with the letters); off: typing selects the item whose
@@ -909,6 +917,7 @@ impl Default for Settings {
             adaptive_offered: false,
             show_extensions: true,
             keybindings: Default::default(),
+            dialog_folders: Default::default(),
             window: None,
             window_display: None,
             date_format: DatePref::Application,
@@ -957,6 +966,8 @@ impl Default for Settings {
             warn_extension_change: true,
             select_on_hover: false,
             tabs_fit_names: false,
+            list_columns_first: false,
+            tab_shows_path: false,
             tab_terminal_button: true,
             preview_details: true,
             type_to_filter: false,

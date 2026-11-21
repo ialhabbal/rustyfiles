@@ -2149,5 +2149,11 @@
  "10ef9c03": "Vo WSL zapisuje Windows vedľa súboru stiahnutého z internetu samostatný súbor \"Zone.Identifier\". Keď je zapnuté, kopírovanie ho odstráni.",
  "31d132e2": "Zobrazovať miesto na diskoch v číslach",
  "04339c77": "Využité a celkové miesto pod pruhom každého disku",
+ "f6bca4e8": "Prestať vždy otvárať tu pre:",
+ "a6a39e94": "Vždy otvárať v tomto priečinku pre:",
+ "6ff5ec59": "Jeho okno Otvoriť / Uložiť sa vždy otvorí v:",
+ "b79ebd26": "Plniť zoznam po stĺpcoch",
+ "c9f22cd9": "Cesta k priečinku na kartách",
+ "b47392d6": "Karty zobrazujú namiesto názvu priečinka jeho celú cestu menším písmom; čo sa nezmestí, sa na konci oreže.",
  "bd479de9": "Vzhľad Prieskumníka súborov Windows"
 }

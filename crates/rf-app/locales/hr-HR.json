@@ -2149,5 +2149,11 @@
  "10ef9c03": "U WSL-u Windows uz datoteku preuzetu s interneta zapisuje zasebnu datoteku \"Zone.Identifier\". Kad je uključeno, kopiranje je briše.",
  "31d132e2": "Prikaži prostor pogona brojkama",
  "04339c77": "Iskorišteni i ukupni prostor ispod trake svakog pogona",
+ "f6bca4e8": "Prestani uvijek otvarati ovdje za:",
+ "a6a39e94": "Uvijek otvori u ovoj mapi za:",
+ "6ff5ec59": "Njegov prozor Otvori / Spremi uvijek se otvara u:",
+ "b79ebd26": "Popunjavaj popis stupac po stupac",
+ "c9f22cd9": "Putanja mape na karticama",
+ "b47392d6": "Kartice umjesto naziva mape prikazuju njezinu cijelu putanju manjim slovima; ono što ne stane odreže se na kraju.",
  "bd479de9": "Izgled Windows Explorera datoteka"
 }

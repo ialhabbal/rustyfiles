@@ -2149,5 +2149,11 @@
  "10ef9c03": "W WSL system Windows zapisuje obok pliku pobranego z internetu osobny plik \"Zone.Identifier\". Gdy włączone, kopiowanie go usuwa.",
  "31d132e2": "Pokazuj miejsce na dyskach w liczbach",
  "04339c77": "Zajęte i całkowite miejsce pod paskiem każdego dysku",
+ "f6bca4e8": "Przestań zawsze otwierać tutaj dla:",
+ "a6a39e94": "Zawsze otwieraj w tym folderze dla:",
+ "6ff5ec59": "Jego okno Otwórz / Zapisz zawsze otwiera się w:",
+ "b79ebd26": "Wypełniaj listę kolumnami",
+ "c9f22cd9": "Ścieżka folderu na kartach",
+ "b47392d6": "Karty pokazują zamiast nazwy folderu jego pełną ścieżkę mniejszą czcionką; to, co się nie mieści, jest ucinane na końcu.",
  "bd479de9": "Wygląd Eksploratora plików Windows"
 }

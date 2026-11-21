@@ -2149,5 +2149,11 @@
  "10ef9c03": "En WSL, Windows escribe un archivo \"Zone.Identifier\" aparte junto a un archivo descargado de internet. Si está activado, la copia lo elimina.",
  "31d132e2": "Mostrar el espacio de las unidades en números",
  "04339c77": "Espacio usado y total bajo la barra de cada unidad",
+ "f6bca4e8": "Dejar de abrir siempre aquí para:",
+ "a6a39e94": "Abrir siempre en esta carpeta para:",
+ "6ff5ec59": "Su ventana Abrir / Guardar siempre se abre en:",
+ "b79ebd26": "Rellenar la lista columna por columna",
+ "c9f22cd9": "La ruta de la carpeta en las pestañas",
+ "b47392d6": "Las pestañas muestran la ruta completa de la carpeta en letra más pequeña en lugar de su nombre; lo que no cabe se corta al final.",
  "bd479de9": "Aspecto del Explorador de archivos de Windows"
 }

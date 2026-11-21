@@ -113,9 +113,22 @@ fn restored_bounds(cx: &App) -> Option<(WindowBounds, Option<DisplayId>)> {
             None
         }
     } else {
+        b = on_primary(b.size, cx);
         None
     };
     Some((if max > 0.5 { WindowBounds::Maximized(b) } else { WindowBounds::Windowed(b) }, display))
+}
+
+/// A window of `want` size in the middle of the main display's free area, made smaller when the display is smaller.
+///
+/// WHY (issue 176: "the RustyFiles window can only be resized from the top"): the first window was 1280 x 800 whatever the screen,
+/// so on a 1366 x 768 screen (or a larger one at a larger scale) its edges lay beyond the screen and under the taskbar, where they
+/// cannot be grabbed.
+fn on_primary(want: Size<Pixels>, cx: &App) -> Bounds<Pixels> {
+    match cx.primary_display() {
+        Some(d) => fit_window_bounds(want, None, d.visible_bounds()),
+        None => Bounds::centered(None, want, cx),
+    }
 }
 
 fn fit_window_bounds(size: Size<Pixels>, origin: Option<Point<Pixels>>, area: Bounds<Pixels>) -> Bounds<Pixels> {
@@ -354,7 +367,7 @@ pub fn open_main_window_made(
         Some(bounds) => (bounds, None),
         None => {
             let restored = if workspace::any_main_window(cx) { None } else { restored_bounds(cx) };
-            restored.unwrap_or_else(|| (WindowBounds::centered(size(px(1280.), px(800.)), cx), None))
+            restored.unwrap_or_else(|| (WindowBounds::Windowed(on_primary(size(px(1280.), px(800.)), cx)), None))
         }
     };
     let options = WindowOptions {
@@ -512,6 +525,11 @@ pub fn main() {
     // Not in the installation folder: the updater renames it, and Windows refuses while it is a working directory of this process
     // or of anything this process starts (`rf_win::ownfolder`). Before everything else, so that every child inherits the way out.
     rf_win::ownfolder::leave();
+    // `--open-with-folder <file> <property> <1|0>`: a file opened in a packaged app with its folder, from a process that ends at once
+    // (see rf_win::neighbours::launch)
+    if std::env::args().nth(1).as_deref() == Some(rf_win::neighbours::ARG) {
+        std::process::exit(rf_win::neighbours::helper_main());
+    }
     // `--shell-probe`: what the shell host finds, windowless and read-only, before anything else is done (see shell::probe)
     if std::env::args().nth(1).as_deref() == Some(shell::probe::ARG) {
         std::process::exit(shell::probe::run());
