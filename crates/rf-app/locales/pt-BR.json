@@ -2155,5 +2155,15 @@
  "b79ebd26": "Preencher a lista coluna por coluna",
  "c9f22cd9": "O caminho da pasta nas abas",
  "b47392d6": "As abas mostram o caminho completo da pasta em letra menor no lugar do nome; o que não cabe é cortado no final.",
- "bd479de9": "Aparência do Explorador de Arquivos do Windows"
+ "bd479de9": "Aparência do Explorador de Arquivos do Windows",
+ "d9cac923": "Recolher todos os grupos",
+ "c30af95d": "Expandir todos os grupos",
+ "5c26267c": "Recolher / expandir todos os grupos",
+ "438fff43": "Janelas do Explorador abertas por outros programas",
+ "109ffa73": "Quando um programa (um gerenciador de downloads, por exemplo) abre o Explorador de Arquivos por conta própria, a janela é fechada e o mesmo local abre no rustyfiles. Funciona enquanto o rustyfiles está aberto.",
+ "6fee9305": "Modo de desempenho",
+ "40761adf": "O Dock pula seus movimentos e é desenhado sobre um fundo sólido em vez de vidro: menos trabalho enquanto um jogo ocupa a placa de vídeo.",
+ "6d5c4fbb": "Pasta de tema",
+ "4f72cd3e": "Uma pasta em themes, na pasta de configurações: o theme.toml dela muda as cores e a pasta icons, os ícones. O formato está em docs/themes.md no GitHub.",
+ "048a70ae": "Abrir a pasta de temas"
 }

@@ -624,6 +624,10 @@ pub struct Settings {
     pub list_columns_first: bool,
     /// A folder's tab shows its whole path (smaller, cut at the end) instead of its name (issue 162).
     pub tab_shows_path: bool,
+    /// Explorer windows that other programs open are closed and their place opened here (issue 37). Off by default.
+    pub catch_explorer_windows: bool,
+    /// A theme folder's name in `<settings folder>\themes` (colours and icons, issues 93 and 94); empty: none.
+    pub theme_folder: String,
     /// The terminal button on each folder's tab. Issue 119: it was in the way of clicks on narrow tabs.
     pub tab_terminal_button: bool,
     /// Typing in a folder's list filters it by name (the filter bar opens with the letters); off: typing selects the item whose
@@ -747,6 +751,8 @@ pub struct Settings {
     pub dock_autohide_windows: bool,
     /// The dock's islands on a solid fill instead of the glass (off; issue 113).
     pub dock_opaque: bool,
+    /// The Dock without its motions and on a solid fill: less work while a game keeps the graphics card busy (issue 133).
+    pub dock_performance: bool,
     /// A thin "Show desktop" strip at the right end of the primary monitor's right island, after the bell, as on Windows' taskbar (off;
     /// issue 127).
     pub dock_show_desktop: bool,
@@ -968,6 +974,8 @@ impl Default for Settings {
             tabs_fit_names: false,
             list_columns_first: false,
             tab_shows_path: false,
+            catch_explorer_windows: false,
+            theme_folder: String::new(),
             tab_terminal_button: true,
             preview_details: true,
             type_to_filter: false,
@@ -1020,6 +1028,7 @@ impl Default for Settings {
             dock_autohide: false,
             dock_autohide_windows: false,
             dock_opaque: false,
+            dock_performance: false,
             dock_show_desktop: false,
             dock_labels: false,
             dock_pins_left: false,
@@ -1335,6 +1344,8 @@ impl Settings {
         // (a text that is no colour is no colour: Windows' accent)
         rf_win::accent::set_override(rf_win::accent::parse_hex(&self.accent_color));
         crate::background::sync_tray(self.run_in_background);
+        crate::background::sync_explorer_catch(self.catch_explorer_windows);
+        crate::themes::set(&self.theme_folder);
         crate::quick_search::sync(self);
         // (the system's own short date and time for the "System" style and older dates, issue 59; set once)
         rf_core::format::set_system_format(rf_win::datefmt::short_date_time);
@@ -1346,7 +1357,9 @@ impl Settings {
         rf_core::format::set_decimal_sizes(self.decimal_sizes);
         SOLID.store(self.backdrop == BackdropPref::Solid, Ordering::Relaxed);
         MAIN_ONLY.store(main_window_only(self.backdrop), Ordering::Relaxed);
-        ANIM.store(self.animations as u8, Ordering::Relaxed);
+        // (the Dock's performance mode: no motion in the Dock's process, whatever the app's own setting)
+        let dock_still = self.dock_performance && crate::background::DOCK_PROCESS.load(Ordering::Relaxed);
+        ANIM.store(if dock_still { AnimPref::Off as u8 } else { self.animations as u8 }, Ordering::Relaxed);
         // HyperGlass: the engine redraws every glass window once when the look changes, and does nothing for the same look again
         HG_SURFACE.store(self.hg_surface.min(100), Ordering::Relaxed);
         rf_win::glass::set_look(self.hyperglass_look());

@@ -478,6 +478,13 @@ pub struct FolderView {
     grid_cols: usize,
     /// Rows per column of the List filled column by column (issue 170), as drawn last; 0 when the folder is not shown so.
     list_rows: usize,
+    /// The last frame showed an unfinished download's file (`.hdpart`) with its progress: the next one is drawn soon after.
+    parts_shown: std::cell::Cell<bool>,
+    part_tick: bool,
+    /// The List filled column by column: each column's left edge and width as drawn last (content coordinates).
+    list_cols: Vec<(f32, f32)>,
+    /// The column widths measured from the names, and what they were measured for (see `list_column_widths`).
+    list_widths: Option<(u64, Vec<f32>)>,
     /// Index into GRID_SIZES.
     grid_size: u8,
     /// Index into ROW_SIZES (Details row height), the "Size" slider in Details.
@@ -706,6 +713,10 @@ impl FolderView {
             },
             grid_cols: 1,
             list_rows: 0,
+            parts_shown: std::cell::Cell::new(false),
+            part_tick: false,
+            list_cols: Vec::new(),
+            list_widths: None,
             grid_size: DEFAULT_GRID_SIZE,
             row_size: DEFAULT_ROW_SIZE,
             col_drag: None,
@@ -999,7 +1010,7 @@ impl FolderView {
                     .relative()
                     .when(selected, |d| d.bg(p.selection).child(theme::selection_pill(&p)))
                     .when(!selected, |d| d.hover(|s| s.bg(p.hover)))
-                    .child(link_marked(
+                    .child(download_marked(link_marked(
                         match &shell_icon {
                             Some(im) => img(im.clone()).size(px(16.)).flex_shrink_0().into_any_element(),
                             None => Icon::new(icons::icon_for(cat)).size(px(16.)).text_color(theme::kind_color(cat, p.dark)).into_any_element(),
@@ -1007,7 +1018,7 @@ impl FolderView {
                         px(16.),
                         e.link,
                         overlay,
-                    ))
+                    ), self.part_frac(ei)))
                     .child(div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, _| this.name_hit = true)).child(crate::rtl::display_text(&e.name)))
                     .when(is_dir, |d| d.child(Icon::new(L::ChevronRight).size(px(12.)).text_color(p.text_tertiary)))
                     .on_mouse_down(
@@ -2115,6 +2126,44 @@ impl FolderView {
         self.tag_snap = Arc::new(map);
     }
 
+    /// How far the download behind an unfinished file (`.hdpart`) is, while HyperDownload's card follows it.
+    fn part_frac(&self, ei: u32) -> Option<f32> {
+        let name = &self.entries.get(ei as usize)?.name;
+        if name.len() < 7 || !name[name.len() - 7..].eq_ignore_ascii_case(".hdpart") {
+            return None;
+        }
+        let f = crate::hyperdownload::part_progress(&self.path_of(ei)?)?;
+        self.parts_shown.set(true);
+        Some(f)
+    }
+
+    /// Whether the folder is shown in groups (Details or Grid with a grouping): the "all groups" button and key apply.
+    pub fn has_groups(&self) -> bool {
+        matches!(self.view_mode, ViewMode::Details | ViewMode::Grid) && self.rows.iter().any(|r| matches!(r, Row::Header(..)))
+    }
+
+    /// Whether every group is folded.
+    pub fn all_groups_folded(&self) -> bool {
+        let mut headers = self.rows.iter().filter_map(|r| if let Row::Header(label, _) = r { Some(label) } else { None }).peekable();
+        headers.peek().is_some() && headers.all(|l| self.collapsed.contains(l.as_ref()))
+    }
+
+    /// Folds every group, or opens them all again when all are folded (issue 181: "collapse them all at once and then expand the
+    /// ones you are interested in").
+    pub fn toggle_all_groups(&mut self, cx: &mut Context<Self>) {
+        if !self.has_groups() {
+            return;
+        }
+        if self.all_groups_folded() {
+            self.collapsed.clear();
+        } else {
+            let labels: Vec<String> = self.rows.iter().filter_map(|r| if let Row::Header(label, _) = r { Some(label.to_string()) } else { None }).collect();
+            self.collapsed.extend(labels);
+        }
+        self.rebuild_visible();
+        cx.notify();
+    }
+
     /// A click on a group's header: the group folds away, or comes back.
     fn toggle_group(&mut self, label: &str, cx: &mut Context<Self>) {
         if !self.collapsed.remove(label) {
@@ -2684,8 +2733,7 @@ impl FolderView {
         let count = self.visible.len();
         let base = self.scroll.0.borrow().base_handle.clone();
         let view = base.bounds();
-        let (row_h, tile_w) = (self.grid_row_h(), self.grid_tile_w());
-        let cw = f32::from(tile_w + GRID_GAP);
+        let row_h = self.grid_row_h();
         let view_h = if view.size.height > px(1.) { f32::from(view.size.height) } else { 480. };
         let rows = (((view_h - LIST_PAD_TOP * 2.) / f32::from(row_h)).floor() as usize).max(1);
         self.list_rows = rows;
@@ -2693,25 +2741,38 @@ impl FolderView {
         if rows != before || view.size.height <= px(1.) {
             window.request_animation_frame();
         }
-        let cols = count.div_ceil(rows);
+        let show_ext = cx.global::<crate::settings::Settings>().show_extensions;
+        let widths = self.list_column_widths(rows, show_ext, window);
+        let mut x = LIST_PAD_LEFT;
+        self.list_cols = widths
+            .iter()
+            .map(|&w| {
+                let c = (x, w);
+                x += w + f32::from(GRID_GAP);
+                c
+            })
+            .collect();
+        let total = x + LIST_PAD_LEFT;
         let off = -f32::from(base.offset().x);
         let width = if view.size.width > px(1.) { f32::from(view.size.width) } else { f32::from(self.content_width) };
-        let first = (((off - LIST_PAD_LEFT) / cw).floor().max(0.) as usize).min(cols);
-        let last = (((off + width) / cw).ceil() as usize + 1).min(cols);
-        let g = GridCellCtx {
+        let first = self.list_cols.partition_point(|&(x, w)| x + w < off);
+        let last = self.list_cols.partition_point(|&(x, _)| x <= off + width);
+        let mut g = GridCellCtx {
             hover_select: cx.global::<crate::settings::Settings>().select_on_hover,
             p: Palette::for_window(window),
-            tile_w,
+            tile_w: px(LIST_COL_MIN),
             row_h,
             thumb_px: self.grid_thumb_px(),
             style: GridStyle::List,
             visual_px: px(20.),
-            show_ext: cx.global::<crate::settings::Settings>().show_extensions,
+            show_ext,
             renamed: self.renamed.clone(),
         };
         let mut columns = Vec::with_capacity(last.saturating_sub(first));
         for c in first..last {
-            let mut col = v_flex().absolute().top(px(LIST_PAD_TOP)).left(px(LIST_PAD_LEFT + c as f32 * cw)).w(tile_w);
+            let (cx0, cw) = self.list_cols[c];
+            g.tile_w = px(cw);
+            let mut col = v_flex().absolute().top(px(LIST_PAD_TOP)).left(px(cx0)).w(px(cw));
             for vi in c * rows..((c + 1) * rows).min(count) {
                 if let Some(cell) = self.grid_cell(vi, None, &g, window, cx) {
                     col = col.child(div().h(row_h).child(cell));
@@ -2739,8 +2800,53 @@ impl FolderView {
                 cx.stop_propagation();
                 cx.notify();
             }))
-            .child(div().relative().h_full().w(px(LIST_PAD_LEFT * 2. + cols as f32 * cw)).children(columns))
+            .child(div().relative().h_full().w(px(total)).children(columns))
             .into_any_element()
+    }
+
+    /// The width of each column of the List filled column by column: as wide as its longest name (with the icon and the padding),
+    /// within limits, as Explorer's List is (issue 170: "each column could size to its contents"). A folder of more than
+    /// `LIST_MEASURE_MOST` items has columns of one width: measuring every name would hold the window up. The widths are kept for
+    /// the same names in the same order, rows per column, extension setting and text size.
+    fn list_column_widths(&mut self, rows: usize, show_ext: bool, window: &mut Window) -> Vec<f32> {
+        let count = self.visible.len();
+        let cols = count.div_ceil(rows.max(1));
+        if count > LIST_MEASURE_MOST {
+            return vec![f32::from(self.grid_tile_w()); cols];
+        }
+        let font_px = rems(0.875).to_pixels(window.rem_size());
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            (self.entries_gen, rows, show_ext, f32::from(font_px).to_bits(), &self.visible).hash(&mut h);
+            self.renamed.as_ref().map(|(a, b)| (a.to_string(), b.to_string())).hash(&mut h);
+            h.finish()
+        };
+        if let Some((k, w)) = &self.list_widths
+            && *k == key
+        {
+            return w.clone();
+        }
+        let style = window.text_style();
+        let mut widths = Vec::with_capacity(cols);
+        for c in 0..cols {
+            let mut most = 0f32;
+            for vi in c * rows..((c + 1) * rows).min(count) {
+                let Some(&ei) = self.visible.get(vi) else { break };
+                let name = row_name(&self.entries[ei as usize], show_ext, self.renamed.as_ref());
+                let w = window.text_system().layout_line(&name, font_px, &[style.to_run(name.len())], None).width;
+                most = most.max(f32::from(w));
+            }
+            // icon 20, the gaps and padding around it and the name, and a little air
+            widths.push((most + LIST_CELL_CHROME).clamp(LIST_COL_MIN, LIST_COL_MAX));
+        }
+        self.list_widths = Some((key, widths.clone()));
+        widths
+    }
+
+    /// The column of the List filled column by column under content x `x` (the nearest one).
+    fn list_col_at(&self, x: f32) -> usize {
+        self.list_cols.partition_point(|&(cx0, w)| cx0 + w < x).min(self.list_cols.len().saturating_sub(1))
     }
 
     /// Scrolls the List filled column by column so that the column of the visible index `vi` is in view.
@@ -2748,9 +2854,8 @@ impl FolderView {
         let rows = self.list_rows.max(1);
         let base = self.scroll.0.borrow().base_handle.clone();
         let width = f32::from(base.bounds().size.width);
-        let cw = f32::from(self.grid_tile_w() + GRID_GAP);
-        let left = LIST_PAD_LEFT + (vi / rows) as f32 * cw;
-        let right = left + cw + LIST_PAD_LEFT;
+        let Some(&(left, cw)) = self.list_cols.get(vi / rows) else { return };
+        let right = left + cw + f32::from(GRID_GAP) + LIST_PAD_LEFT;
         let mut o = base.offset();
         let off = -f32::from(o.x);
         if left - LIST_PAD_LEFT < off {
@@ -2885,7 +2990,7 @@ impl FolderView {
         };
         let overlay = self.overlay_of(ei, visual_px, cx);
         let e = &self.entries[ei as usize];
-        let visual = link_marked(visual, visual_px, e.link, overlay);
+        let visual = download_marked(link_marked(visual, visual_px, e.link, overlay), self.part_frac(ei));
         let rename_input = self.renaming.as_ref().filter(|(i, _)| *i == ei).map(|(_, inp)| inp.clone());
         let label: AnyElement = match rename_input {
             // the text stays where the label was: centered, the label's size
@@ -3305,8 +3410,7 @@ impl FolderView {
                         if y1 >= pt && x1 >= pl {
                             let r0 = ((y0 - pt).max(0.0) / rh) as usize;
                             let r1 = (((y1 - pt) / rh) as usize).min(rows - 1);
-                            let c0 = ((x0 - pl).max(0.0) / cw) as usize;
-                            let c1 = ((x1 - pl) / cw) as usize;
+                            let (c0, c1) = (self.list_col_at(x0), self.list_col_at(x1));
                             for c in c0..=c1 {
                                 for r in r0..=r1.max(r0) {
                                     if let Some(&ei) = self.visible.get(c * rows + r) {
@@ -4531,7 +4635,7 @@ impl FolderView {
                                     ),
                             )
                         })
-                        .child(link_marked(
+                        .child(download_marked(link_marked(
                             match &shell_icon {
                                 Some(im) => img(im.clone()).size(px(16.)).flex_shrink_0().into_any_element(),
                                 None => Icon::new(icons::icon_for(cat))
@@ -4543,7 +4647,7 @@ impl FolderView {
                             px(16.),
                             e.link,
                             overlay,
-                        ))
+                        ), self.part_frac(ei)))
                         .child(name_el)
                         // encrypted: an archive member that needs a password, or an EFS file
                         .children((e.attrs & rf_core::attrs::ENCRYPTED != 0).then(|| Icon::new(L::Lock).size(px(12.)).flex_shrink_0().text_color(p.text_secondary)))
@@ -4636,15 +4740,17 @@ impl FolderView {
     fn render_details(&mut self, p: &Palette, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let count = self.visible.len();
         let list_rows_before = std::mem::take(&mut self.list_rows);
+        // (every group folded leaves no item but the groups' headers: that is not an empty folder)
+        let shown = count.max(self.rows.len());
         let mut side_bar = false;
         // Details and Grid get a scrollbar over the list (Columns has one list per column).
         let mut list_body = false;
         let body: AnyElement = if let Some(err) = &self.error {
             empty_state(p, L::TriangleAlert, crate::i18n::td(err), t!("Klasör açılamadı")).into_any_element()
-        } else if count == 0 && self.loading && self.load_started.elapsed() >= SLOW_LOAD {
+        } else if shown == 0 && self.loading && self.load_started.elapsed() >= SLOW_LOAD {
             let text = self.search_stage.map_or_else(|| t!("Yükleniyor…").to_string(), |s| s.text().to_string());
             empty_state(p, L::LoaderCircle, text, "").into_any_element()
-        } else if count == 0 && !self.loading {
+        } else if shown == 0 && !self.loading {
             // (a search that found nothing is no empty folder)
             let msg = if self.filter.query.is_empty() && !matches!(self.location(), Location::Search { .. }) { t!("Bu klasör boş") } else { t!("Eşleşen öğe yok") };
             empty_state(p, L::FolderOpen, msg.to_string(), "").into_any_element()
@@ -5444,6 +5550,12 @@ const GRID_GAP: Pixels = px(4.);
 /// The List filled column by column: room above its rows and left of its first column.
 const LIST_PAD_TOP: f32 = 8.;
 const LIST_PAD_LEFT: f32 = 6.;
+/// The List filled column by column: a column's narrowest and widest, what a cell adds to its name (the icon, the gaps and the
+/// padding), and the most items whose names are measured for the columns' widths.
+const LIST_COL_MIN: f32 = 140.;
+const LIST_COL_MAX: f32 = 460.;
+const LIST_CELL_CHROME: f32 = 8. + 20. + 8. + 8. + 12.;
+const LIST_MEASURE_MOST: usize = 4000;
 /// Grid sizes (Ctrl+= / Ctrl+-): tile width, row height, thumbnail pixels.
 const GRID_SIZES: [(f32, f32, u32); 5] = [(76., 94., 64), (92., 112., 80), (124., 150., 128), (172., 204., 192), (236., 276., 272)];
 const DEFAULT_GRID_SIZE: u8 = 2;
@@ -5553,6 +5665,18 @@ pub(crate) fn open_in_background_sorted(path: PathBuf, key: SortKey, ascending: 
 
 impl Render for FolderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // an unfinished download's progress on its icon moves on: drawn again in a moment while one is shown
+        if self.parts_shown.replace(false) && !self.part_tick {
+            self.part_tick = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
+                let _ = this.update(cx, |v, cx| {
+                    v.part_tick = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         if std::mem::take(&mut self.pending_rename) {
             // Create the editor now, but focus it on the next frame: a focus target that is not
             // part of the frame being drawn gets dropped by GPUI.
@@ -5654,6 +5778,7 @@ impl Render for FolderView {
                 this.selected = this.visible.iter().copied().collect();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ToggleAllGroups, _, cx| this.toggle_all_groups(cx)))
             .on_action(cx.listener(|this, _: &InvertSelection, _, cx| {
                 let next: HashSet<u32> = this.visible.iter().copied().filter(|i| !this.selected.contains(i)).collect();
                 this.selected = next;
@@ -5978,6 +6103,27 @@ fn overlay_box(size: Pixels) -> Pixels {
 
 /// `icon` with the marks drawn over it: another program's overlay (`overlay`, icon-sized with its mark in a corner, as Explorer draws
 /// it) and the arrow of a symbolic link or junction (`link`).
+/// An unfinished download's file (`.hdpart`) shows how far it is: a thin molten bar under its icon.
+fn download_marked(icon: AnyElement, frac: Option<f32>) -> AnyElement {
+    let Some(f) = frac else { return icon };
+    div()
+        .relative()
+        .flex_shrink_0()
+        .child(icon)
+        .child(
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(-3.))
+                .h(px(2.))
+                .rounded_full()
+                .bg(gpui::rgba(0x8080_8055))
+                .child(div().h_full().rounded_full().bg(crate::downloads_view::ember()).w(relative(f.clamp(0.02, 1.)))),
+        )
+        .into_any_element()
+}
+
 fn link_marked(icon: AnyElement, size: Pixels, link: bool, overlay: Option<Arc<gpui::RenderImage>>) -> AnyElement {
     if !link && overlay.is_none() {
         return icon;

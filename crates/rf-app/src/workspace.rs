@@ -3255,6 +3255,8 @@ impl Workspace {
             Icon::new(icon).size(px(16.)).into_any_element()
         };
         let preview_icon = toolbar_icon(L::PanelRight);
+        // only while the folder is shown in groups (issue 181)
+        let (has_groups, all_folded) = (tab.has_groups(), tab.all_groups_folded());
 
         let cmd = |id: &'static str, icon: L, tip: &'static str, enabled: bool, cx: &mut Context<Self>, run: fn(&mut Self, &mut Window, &mut Context<Self>)| {
             div()
@@ -3449,6 +3451,26 @@ impl Workspace {
                     }))
             })
             .child(div().flex_1())
+            .when(has_groups, |d| {
+                let tip = if all_folded { t!("Tüm grupları genişlet") } else { t!("Tüm grupları daralt") };
+                d.child(
+                    div()
+                        .id("cb-groups")
+                        .h(px(32.))
+                        .w(px(36.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(theme::RADIUS_SM)
+                        .hover(|s| s.bg(p.hover))
+                        .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(format!("{tip}  (Ctrl+Shift+G)")).build(w, cx))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let tab = this.active_tab().clone();
+                            tab.update(cx, |v, cx| v.toggle_all_groups(cx));
+                        }))
+                        .child(Icon::new(if all_folded { L::ChevronsUpDown } else { L::ChevronsDownUp }).size(px(16.))),
+                )
+            })
             .children(on("filter").then(|| {
                 div()
                     .id("cb-filter")

@@ -2155,5 +2155,15 @@
  "b79ebd26": "Fyll listan kolumn för kolumn",
  "c9f22cd9": "Mappens sökväg på flikar",
  "b47392d6": "Flikar visar mappens fullständiga sökväg med mindre text i stället för namnet; det som inte får plats klipps av i slutet.",
- "bd479de9": "Utseende för Windows Utforskaren"
+ "bd479de9": "Utseende för Windows Utforskaren",
+ "d9cac923": "Dölj alla grupper",
+ "c30af95d": "Visa alla grupper",
+ "5c26267c": "Dölj / visa alla grupper",
+ "438fff43": "Utforskarfönster som andra program öppnar",
+ "109ffa73": "När ett program (till exempel en nedladdningshanterare) själv startar Utforskaren stängs dess fönster och samma plats öppnas i rustyfiles. Fungerar medan rustyfiles körs.",
+ "6fee9305": "Prestandaläge",
+ "40761adf": "Dock hoppar över sina rörelser och ritas på en enfärgad bakgrund i stället för glas: mindre arbete medan ett spel håller grafikkortet upptaget.",
+ "6d5c4fbb": "Temamapp",
+ "4f72cd3e": "En mapp i themes i inställningsmappen: dess theme.toml ändrar färgerna och mappen icons ikonerna. Formatet finns i docs/themes.md på GitHub.",
+ "048a70ae": "Öppna temamappen"
 }
