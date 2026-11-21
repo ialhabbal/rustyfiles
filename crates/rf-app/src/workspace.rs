@@ -2622,10 +2622,7 @@ impl Workspace {
                                 .text_color(p.text_secondary)
                                 .hover(|s| s.bg(p.hover))
                                 .when(!popups_open, |d| d.tooltip(|w, cx| gpui_kit::component::tooltip::Tooltip::new(t!("Sekme eylemleri")).build(w, cx)))
-                                .child(crate::icons::original_icon(
-                                    if self.compact.is_some() { L::PictureInPicture2 } else { L::PanelLeft },
-                                    px(16.),
-                                ))
+                                .child(Icon::new(if self.compact.is_some() { L::PictureInPicture2 } else { L::PanelLeft }).size(px(16.)))
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                                 .on_click(cx.listener(|this, _, window, cx| this.tab_actions_menu(window, cx))),
                         ),
@@ -3939,7 +3936,7 @@ impl Workspace {
         if explorer_look {
             head = head.child(div().mx_2().my_2().h(px(1.)).flex_shrink_0().bg(section_divider));
         }
-        let pins_apart = self.shows_tree(rail);
+        let pins_apart = self.shows_tree(rail) && !explorer_look;
         let pins_top = if pins_apart {
             Some(head.px_2().pt_1().pb_1().flex_shrink_0().max_h(relative(0.45)).overflow_y_scroll().border_b_1().border_color(p.divider))
         } else {
