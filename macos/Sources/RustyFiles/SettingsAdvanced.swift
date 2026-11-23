@@ -20,6 +20,13 @@ extension AppSettings {
         set { store(newValue.isEmpty ? nil : newValue, "editorApp") }
     }
 
+    /// The terminal "Open in Terminal" uses (#224 on Windows): a bundle id or an app's path;
+    /// "" is macOS's Terminal.
+    static var terminalApp: String {
+        get { d.string(forKey: "terminalApp") ?? "" }
+        set { store(newValue.isEmpty ? nil : newValue, "terminalApp") }
+    }
+
     /// When the menus offer "Open in editor": "git" (inside a Git repository), "always", "never".
     static var editorMenu: String {
         get { d.string(forKey: "editorMenu") ?? "git" }
@@ -234,6 +241,20 @@ extension SettingsContent {
                     (String(localized: "Automatic"), { AppSettings.editorApp = "" }),
                 ])),
             .card(
+                title: String(localized: "Terminal"), detail: String(localized: "What “Open in Terminal” opens the folder in."), icon: "square-terminal",
+                control: .choice(
+                    options: Terminals.options(), get: { AppSettings.terminalApp }, set: { AppSettings.terminalApp = $0 })),
+            .card(
+                title: String(localized: "Another terminal"), detail: nil, icon: nil,
+                control: .buttons([
+                    (String(localized: "Choose…"), {
+                        let panel = NSOpenPanel()
+                        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+                        panel.allowedContentTypes = [.application]
+                        if panel.runModal() == .OK, let u = panel.url { AppSettings.terminalApp = u.path }
+                    }),
+                ])),
+            .card(
                 title: String(localized: "“Open in editor” in the menus"), detail: nil, icon: "square-code",
                 control: .choice(
                     options: [("git", String(localized: "In Git repositories")), ("always", String(localized: "Always")), ("never", String(localized: "Never"))],
@@ -257,6 +278,15 @@ extension SettingsContent {
                 title: String(localized: "Keep running when the last window closes"),
                 detail: String(localized: "A new window then opens at once, and Ferry keeps receiving."), icon: "app-window",
                 control: .toggle(get: { AppSettings.keepRunning }, set: { AppSettings.keepRunning = $0 })),
+            .card(
+                title: String(localized: "Default file manager"),
+                detail: DefaultFileManager.isDefault
+                    ? String(localized: "rustyfiles opens the folders other apps show (“Show in Finder”) and open. The Dock, the desktop and Open / Save panels stay Finder’s.")
+                    : String(localized: "Make other apps’ “Show in Finder” and the folders they open come to rustyfiles. The Dock, the desktop and Open / Save panels stay Finder’s."),
+                icon: "folder-open",
+                control: .buttons(DefaultFileManager.isDefault
+                    ? [(String(localized: "Give it back to Finder"), { DefaultFileManager.giveBack() })]
+                    : [(String(localized: "Make rustyfiles the default"), { DefaultFileManager.claim() })])),
             .card(
                 title: String(localized: "Open archives with rustyfiles"),
                 detail: String(localized: "ZIP, 7z and RAR files opened from Finder or other apps open here, like folders."), icon: "archive",
@@ -305,7 +335,9 @@ extension SettingsContent {
                     ThumbnailCache.shared.clear()
                     try? FileManager.default.removeItem(at: ArchiveStore.scratchFolder())
                 })])),
-        ]
+            // Developer tools live here now, as on Windows (cc774b1)
+            .section(String(localized: "Developer tools")),
+        ] + devRows()
     }
 }
 
@@ -320,5 +352,78 @@ enum ArchiveDefaults {
                 if let error { Log.write("default app for \(t.identifier): \(error.localizedDescription)") }
             }
         }
+    }
+}
+
+/// Advanced › Default file manager: other apps' "Show in Finder" and the folders they open come
+/// to rustyfiles (the global NSFileViewer setting and the folder handler, as ForkLift and Path
+/// Finder do it). Finder itself stays: the Dock, the desktop and the Open / Save panels are its.
+@MainActor
+enum DefaultFileManager {
+    private static var id: String { Bundle.main.bundleIdentifier ?? "com.rustyfiles.mac" }
+
+    static var isDefault: Bool {
+        UserDefaults(suiteName: UserDefaults.globalDomain)?.string(forKey: "NSFileViewer") == id
+    }
+
+    private static func defaults(_ args: [String]) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        p.arguments = args
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        p.waitUntilExit()
+    }
+
+    static func claim() {
+        defaults(["write", "-g", "NSFileViewer", "-string", id])
+        NSWorkspace.shared.setDefaultApplication(at: Bundle.main.bundleURL, toOpen: .folder) { error in
+            if let error { Log.write("default folder app: \(error.localizedDescription)") }
+            DispatchQueue.main.async { MainActor.assumeIsolated { changed() } }
+        }
+    }
+
+    static func giveBack() {
+        defaults(["delete", "-g", "NSFileViewer"])
+        if let finder = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.finder") {
+            NSWorkspace.shared.setDefaultApplication(at: finder, toOpen: .folder) { error in
+                if let error { Log.write("default folder app back to Finder: \(error.localizedDescription)") }
+                DispatchQueue.main.async { MainActor.assumeIsolated { changed() } }
+            }
+        } else {
+            changed()
+        }
+    }
+
+    private static func changed() {
+        NotificationCenter.default.post(name: .rfSettingsChanged, object: nil, userInfo: ["key": "defaultFileManager"])
+    }
+
+    /// "Reveal" from other apps (the Apple event Finder gets for "Show in Finder"): the items'
+    /// folder opens with them selected.
+    static func listenForReveal() {
+        NSAppleEventManager.shared().setEventHandler(
+            RevealHandler.shared, andSelector: #selector(RevealHandler.reveal(_:reply:)),
+            forEventClass: AEEventClass(kAEMiscStandards), andEventID: AEEventID(kAEMakeObjectsVisible))
+    }
+}
+
+@MainActor
+final class RevealHandler: NSObject {
+    static let shared = RevealHandler()
+
+    @objc func reveal(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
+        guard let list = event.paramDescriptor(forKeyword: keyDirectObject) else { return }
+        var urls: [URL] = []
+        let count = list.numberOfItems
+        if count == 0 {
+            if let u = list.fileURLValue { urls.append(u) }
+        } else {
+            for i in 1...count { if let u = list.atIndex(i)?.fileURLValue { urls.append(u) } }
+        }
+        guard !urls.isEmpty else { return }
+        NSApp.activate()
+        AppDelegate.shared.application(NSApp, open: urls)
     }
 }

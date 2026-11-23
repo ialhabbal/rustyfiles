@@ -4,6 +4,10 @@ import AppKit
 struct TabInfo {
     let title: String
     let icon: String
+    /// The folder's path (with ~), for the tooltip and Settings › The folder's path on tabs.
+    var path: String?
+    /// The folder above that tells this tab from another of the same name.
+    var hint: String?
 }
 
 /// The tabs, drawn as in the Windows app (workspace.rs `tab_strip`): one width for all,
@@ -12,19 +16,67 @@ struct TabInfo {
 /// strip) and its icon is in the accent colour.
 /// Clicks on empty space drag the window; a double click zooms it.
 @MainActor
-final class TabStripView: HoverView {
-    var tabs: [TabInfo] = [] { didSet { needsDisplay = true; superview?.needsLayout = true } }
+final class TabStripView: HoverView, NSViewToolTipOwner {
+    var tabs: [TabInfo] = [] { didSet { needsDisplay = true; superview?.needsLayout = true; needsLayout = true } }
+
+    /// For each tab's folder, the name of a folder above it that tells it apart from the other
+    /// tabs' folders of the same name (workspace.rs `tab_hints`): the nearest level whose name
+    /// differs, up to five levels; nil when no other tab has its name.
+    static func hints(_ urls: [URL?]) -> [String?] {
+        func level(_ u: URL, _ up: Int) -> String? {
+            var d = u
+            for _ in 0..<up {
+                let p = d.deletingLastPathComponent()
+                if p.path == d.path { return nil }
+                d = p
+            }
+            return d.path == "/" ? "/" : d.lastPathComponent
+        }
+        return urls.map { me in
+            guard let me else { return nil }
+            let mine = me.lastPathComponent.lowercased()
+            let others = urls.compactMap { $0 }.filter { $0.lastPathComponent.lowercased() == mine && $0.standardizedFileURL != me.standardizedFileURL }
+            guard !others.isEmpty else { return nil }
+            for up in 1...5 {
+                guard let here = level(me, up) else { return nil }
+                if others.allSatisfy({ level($0, up)?.lowercased() != here.lowercased() }) { return here }
+            }
+            return nil
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        removeAllToolTips()
+        for i in tabs.indices where tabs[i].path != nil { addToolTip(tabRect(i), owner: self, userData: UnsafeMutableRawPointer(bitPattern: i + 1)) }
+    }
+
+    nonisolated func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        let i = Int(bitPattern: data) - 1
+        return MainActor.assumeIsolated { tabs.indices.contains(i) ? (tabs[i].path ?? "") : "" }
+    }
     var active = 0 { didSet { needsDisplay = true; superview?.needsLayout = true } }
     var onSelect: ((Int) -> Void)?
     var onClose: ((Int) -> Void)?
     /// The tab menu for the tab at this index (workspace.rs `tab_menu`).
     var menuFor: ((Int) -> NSMenu?)?
+    /// A tab dragged to another place in the strip.
+    var onMove: ((Int, Int) -> Void)?
+    /// A tab dragged out of the strip: a window of its own where it was let go (screen point).
+    var onTearOff: ((Int, NSPoint) -> Void)?
+    /// Files dropped on a tab go into its folder; nil: that tab takes none.
+    var dropFolder: ((Int) -> URL?)?
+    var onDropFiles: ((Int, NSDraggingInfo) -> Bool)?
 
     private var pressedClose: Int?
+    /// A tab being dragged: which one, where the press was, and whether it has left the strip.
+    private var dragging: (index: Int, start: NSPoint, out: Bool)?
+    /// The tab files are held over.
+    private var dropTab: Int? { didSet { if dropTab != oldValue { needsDisplay = true } } }
 
     private static let minW: CGFloat = 72
     private static let maxW: CGFloat = 220
-    private static let height: CGFloat = 32
+    private static var height: CGFloat { Metrics.compact ? 28 : 32 }
 
     override var mouseDownCanMoveWindow: Bool { false }
 
@@ -65,7 +117,12 @@ final class TabStripView: HoverView {
             let r = tabRect(i)
             let isActive = i == active
             let path = NSBezierPath(roundedTopRect: r, radius: Metrics.radius)
-            if isActive && !AppSettings.isGlass {
+            if dropTab == i {
+                // a drop target: the selection fill with an accent outline
+                Draw.roundedRect(r, radius: Metrics.radius, fill: p.selection)
+                p.accent.setStroke()
+                NSBezierPath(roundedRect: r.insetBy(dx: 0.5, dy: 0.5), xRadius: Metrics.radius, yRadius: Metrics.radius).stroke()
+            } else if isActive && !AppSettings.isGlass {
                 // off glass the active tab is filled, as on Windows (no lens)
                 p.tabActive.setFill()
                 path.fill()
@@ -79,7 +136,19 @@ final class TabStripView: HoverView {
             x += 14 + 8
             let close = showsClose(i, hoveredTab: hoveredTab)
             let textEnd = close ? closeRect(i).minX - 8 : r.maxX - 4
-            Draw.text(t.title, in: NSRect(x: x, y: r.minY, width: max(textEnd - x, 0), height: r.height), font: Metrics.textSm, color: isActive ? p.text : p.textSecondary)
+            let room = NSRect(x: x, y: r.minY, width: max(textEnd - x, 0), height: r.height)
+            let color = isActive ? p.text : p.textSecondary
+            if AppSettings.tabPath, let path = t.path {
+                Draw.text(path, in: room, font: Metrics.textXs, color: color, truncation: .byTruncatingTail)
+            } else if let hint = t.hint {
+                // the name first (never more than 70 % of the room), the telling folder after it, lighter
+                let nameW = min(Draw.textWidth(t.title, font: Metrics.textSm), room.width * 0.7)
+                Draw.text(t.title, in: NSRect(x: room.minX, y: room.minY, width: nameW, height: room.height), font: Metrics.textSm, color: color)
+                let hx = room.minX + nameW + 4
+                Draw.text("@" + hint, in: NSRect(x: hx, y: room.minY, width: max(room.maxX - hx, 0), height: room.height), font: Metrics.textSm, color: p.textTertiary)
+            } else {
+                Draw.text(t.title, in: room, font: Metrics.textSm, color: color)
+            }
             if close {
                 let c = closeRect(i)
                 if let hp = hoverPoint, c.contains(hp) {
@@ -105,12 +174,59 @@ final class TabStripView: HoverView {
             return
         }
         onSelect?(i)
+        dragging = (i, pt, false)
+    }
+
+    /// Dragging a tab sideways moves it among the others; far enough up or down, it leaves the
+    /// strip and becomes a window of its own when let go (workspace.rs tab drag).
+    override func mouseDragged(with event: NSEvent) {
+        guard var d = dragging else { return }
+        let pt = convert(event.locationInWindow, from: nil)
+        d.out = tabs.count > 1 && abs(pt.y - bounds.midY) > bounds.height + 20
+        if !d.out, abs(pt.x - d.start.x) > 4 {
+            let target = min(max(Int((pt.x - 4) / (tabWidth + 4)), 0), tabs.count - 1)
+            if target != d.index {
+                onMove?(d.index, target)
+                d.index = target
+            }
+        }
+        dragging = d
     }
 
     override func mouseUp(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
         if let i = pressedClose, closeRect(i).contains(pt) { onClose?(i) }
         pressedClose = nil
+        if let d = dragging, d.out, let w = window {
+            onTearOff?(d.index, w.convertPoint(toScreen: event.locationInWindow))
+        }
+        dragging = nil
+    }
+
+    // MARK: files dropped on a tab
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        registerForDraggedTypes([.fileURL])
+    }
+
+    private func dropOperation(_ info: NSDraggingInfo) -> NSDragOperation {
+        let pt = convert(info.draggingLocation, from: nil)
+        dropTab = tab(at: pt).flatMap { dropFolder?($0) != nil ? $0 : nil }
+        guard let i = dropTab, let dest = dropFolder?(i) else { return [] }
+        let urls = FileListController.droppedURLs(info)
+        guard !urls.isEmpty, !urls.allSatisfy({ $0.deletingLastPathComponent().standardizedFileURL == dest.standardizedFileURL }) else { return [] }
+        return FileListController.dropKind(info, urls, into: dest) == .copy ? .copy : .move
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { dropOperation(sender) }
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation { dropOperation(sender) }
+    override func draggingExited(_ sender: NSDraggingInfo?) { dropTab = nil }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        defer { dropTab = nil }
+        guard let i = dropTab, dropOperation(sender) != [] else { return false }
+        return onDropFiles?(i, sender) ?? false
     }
 
     override func menu(for event: NSEvent) -> NSMenu? {
@@ -151,6 +267,9 @@ final class TitleBarView: FlippedView {
     private let tabLens = LensView(cornerRadius: Metrics.radius)
     /// The round glass behind "+" (`LensShape::Circle`).
     private let plusLens = LensView(cornerRadius: 14)
+    /// A saved session's name, beside the "+".
+    var sessionName: String? { didSet { sessionLabel.stringValue = sessionName ?? ""; sessionLabel.isHidden = sessionName == nil } }
+    private let sessionLabel = NSTextField(labelWithString: "")
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -159,6 +278,11 @@ final class TitleBarView: FlippedView {
         tabClip.addSubview(tabLens)
         // lenses first: they lie under the tabs' text and the "+" icon
         [tabClip, plusLens, strip, plus].forEach(addSubview)
+        sessionLabel.font = Metrics.textXs
+        sessionLabel.textColor = .tertiaryLabelColor
+        sessionLabel.lineBreakMode = .byTruncatingTail
+        sessionLabel.isHidden = true
+        addSubview(sessionLabel)
     }
 
     @available(*, unavailable)
@@ -173,7 +297,8 @@ final class TitleBarView: FlippedView {
     override func layout() {
         super.layout()
         // The tabs start right after the window buttons (the sidebar toggle is in the nav row).
-        let stripX = Metrics.trafficLightsWidth
+        // (in the window's own points: the window buttons do not grow with the interface scale)
+        let stripX = Metrics.trafficLightsWidth / max(convert(NSSize(width: 1, height: 0), to: nil).width, 0.1)
         let room = max(bounds.width - stripX - 4 - 28 - 12, 120)
         strip.frame = NSRect(x: stripX, y: 0, width: room, height: bounds.height)
         // the "+" follows the last tab: ml_1 and 2 px off the bottom
@@ -181,6 +306,10 @@ final class TitleBarView: FlippedView {
         plus.frame = NSRect(x: plusX, y: bounds.height - 2 - 28, width: 28, height: 28)
         plusLens.frame = plus.frame
         plusLens.isHidden = !AppSettings.isGlass
+        if !sessionLabel.isHidden {
+            let w = min(sessionLabel.intrinsicContentSize.width, max(bounds.width - plus.frame.maxX - 16, 0))
+            sessionLabel.frame = NSRect(x: plus.frame.maxX + 8, y: plus.frame.midY - 8, width: w, height: 16)
+        }
 
         tabClip.frame = strip.frame
         var lens = strip.activeTabRect

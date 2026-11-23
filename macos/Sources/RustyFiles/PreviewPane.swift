@@ -76,6 +76,18 @@ final class PreviewPane: FlippedView {
 
     /// `p_3 gap_3`: the picture 232 high, the name, then the property rows.
     private func layoutContent() {
+        let details = AppSettings.previewDetails
+        nameLabel.isHidden = !details
+        rows.isHidden = !details
+        if !details {
+            // only the picture, as large as the pane
+            let w = scroll.contentSize.width, h = scroll.contentSize.height
+            visualBox.frame = NSRect(x: 12, y: 12, width: w - 24, height: h - 24)
+            quickLook?.frame = visualBox.bounds
+            iconView.frame = NSRect(x: (w - 24 - 96) / 2, y: (h - 24 - 96) / 2, width: 96, height: 96)
+            content.frame = NSRect(x: 0, y: 0, width: w, height: h)
+            return
+        }
         if atBottom { return layoutWide() }
         let w = scroll.contentSize.width
         let inner = w - 24
@@ -213,6 +225,25 @@ final class PreviewPane: FlippedView {
     }
 
     nonisolated private static func quickPropertiesRaw(_ url: URL) -> URLResourceValues? { try? url.resourceValues(forKeys: keys) }
+
+    /// The box shown when the pointer rests on an item (Explorer's info tip, folder_view.rs
+    /// `item_tooltip_text`): its name, then type, size, dates and a picture's dimensions.
+    static func hoverDetails(_ url: URL, folder: Bool) -> String {
+        let v = quickPropertiesRaw(url)
+        var lines = [FileManager.default.displayName(atPath: url.path)]
+        func add(_ k: String, _ value: String?) { if let value, !value.isEmpty { lines.append("\(k): \(value)") } }
+        add(String(localized: "Type"), v?.localizedTypeDescription ?? (folder ? String(localized: "Folder") : nil))
+        if !folder { add(String(localized: "Size"), v?.fileSize.map { formatSize(bytes: UInt64($0)) }) }
+        if !folder, let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+            let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+            let w = props[kCGImagePropertyPixelWidth] as? Int, let h = props[kCGImagePropertyPixelHeight] as? Int
+        {
+            add(String(localized: "Dimensions"), "\(w) × \(h)")
+        }
+        add(String(localized: "Modified"), when(v?.contentModificationDate))
+        add(String(localized: "Created"), when(v?.creationDate))
+        return lines.joined(separator: "\n")
+    }
 
     private static func quickProperties(_ url: URL, folder: Bool) -> [(String, String)] {
         let v = quickPropertiesRaw(url)

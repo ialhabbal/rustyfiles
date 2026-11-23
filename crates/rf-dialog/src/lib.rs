@@ -11,6 +11,8 @@
 
 pub mod proto;
 #[cfg(windows)]
+// (in tests the picker is answered in place, see `com::tests`)
+#[cfg_attr(test, allow(dead_code))]
 mod ipc;
 
 /// One line to `%LOCALAPPDATA%/rustyfiles/dialog.log` (kept under 256 KB): which app asked,
@@ -46,11 +48,16 @@ mod com {
     use windows::Win32::UI::Shell::Common::{COMDLG_FILTERSPEC, ITEMIDLIST};
     use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyDescriptionList, IPropertyStore};
     use windows::Win32::UI::Shell::*;
+    use windows::Win32::System::Ole::IOleWindow;
     use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
     use windows::core::{GUID, HRESULT, IUnknown, Interface, PCWSTR, PWSTR, Ref, Result, implement, w};
     use windows_core::{BOOL as WBOOL, IUnknownImpl as _};
 
     use crate::proto::{Filter, Mode, Request};
+
+    /// How long to wait before offering a pick to the app again after its OnFileOk said S_FALSE: Firefox's input protection waits
+    /// `security.notification_enable_delay`, 500 ms out of the box, after the first folder.
+    const SECOND_OFFER_MS: u64 = 700;
 
     type DllGetClassObjectFn = unsafe extern "system" fn(*const GUID, *const GUID, *mut *mut c_void) -> HRESULT;
 
@@ -175,9 +182,11 @@ mod com {
         result: Option<Vec<String>>,
         /// While the app's event sinks are asked what they do with a selection (`folder_label`): the path that is "selected".
         probe: Option<String>,
+        /// While `Show` runs: the window that owns it, which is what the dialog's window is as far as the app can tell (`IOleWindow`).
+        showing_owner: Option<isize>,
     }
 
-    #[implement(IFileOpenDialog, IFileSaveDialog, IFileDialogCustomize)]
+    #[implement(IFileOpenDialog, IFileSaveDialog, IFileDialog2, IFileDialogCustomize, IOleWindow, windows::Win32::System::Ole::IObjectWithSite)]
     pub struct Dialog {
         save: bool,
         real: IFileDialog,
@@ -270,6 +279,14 @@ mod com {
     impl IModalWindow_Impl for Dialog_Impl {
         fn Show(&self, owner: HWND) -> Result<()> {
             trace("Show");
+            /// Clears `showing_owner` however Show returns.
+            struct Shown<'a>(&'a RefCell<State>);
+            impl Drop for Shown<'_> {
+                fn drop(&mut self) {
+                    self.0.borrow_mut().showing_owner = None;
+                }
+            }
+            let _shown = Shown(&self.st);
             let off = std::env::var_os("RUSTYFILES_DIALOG_OFF").is_some();
             if off || self.st.borrow().customized {
                 crate::log(&format!("show: Windows' dialog (customized={})", self.st.borrow().customized));
@@ -294,6 +311,24 @@ mod com {
                     let _ = EnableWindow(owner, false);
                 }
             }
+            // Windows' dialog tells its event sinks that its first folder is in place (OnFolderChange) as it opens. Firefox's input
+            // protection (FileDialogInputProtector) refuses any OnFileOk that comes before that, or within its delay after it, with
+            // S_FALSE: without this every pick in Firefox was refused (issue 116). Told now, before the user is asked.
+            {
+                let sinks: Vec<IFileDialogEvents> = self.st.borrow().sinks.iter().map(|(_, s)| s.clone()).collect();
+                if !sinks.is_empty()
+                    && let Ok(me) = self.to_interface::<IFileOpenDialog>().cast::<IFileDialog>()
+                {
+                    for s in &sinks {
+                        let _ = unsafe { (Interface::vtable(s).OnFolderChange)(Interface::as_raw(s), Interface::as_raw(&me)) };
+                    }
+                }
+            }
+            // (from here until Show returns the app may ask for the dialog's window: WPF does in OnFileOk, see `IOleWindow_Impl`)
+            self.st.borrow_mut().showing_owner = Some(owner.0 as isize);
+            #[cfg(test)]
+            let answer = tests::CANNED.with(|c| c.borrow_mut().take());
+            #[cfg(not(test))]
             let answer = crate::ipc::pick(&req, owner);
             if has_owner {
                 unsafe {
@@ -323,7 +358,15 @@ mod com {
             let me: IFileDialog = self.to_interface::<IFileOpenDialog>().cast()?;
             let sinks: Vec<IFileDialogEvents> = self.st.borrow().sinks.iter().map(|(_, s)| s.clone()).collect();
             for s in sinks {
-                let hr = unsafe { (Interface::vtable(&s).OnFileOk)(Interface::as_raw(&s), Interface::as_raw(&me)) };
+                let ok = || unsafe { (Interface::vtable(&s).OnFileOk)(Interface::as_raw(&s), Interface::as_raw(&me)) };
+                let mut hr = ok();
+                if hr == S_FALSE {
+                    // a guard against a click that comes too soon (Firefox's, above) says no to a pick made within its delay: our
+                    // window cannot stay open for a second try as Windows' does, so the pick is offered once more after the delay
+                    std::thread::sleep(std::time::Duration::from_millis(SECOND_OFFER_MS));
+                    hr = ok();
+                    crate::log(&format!("show: OnFileOk said S_FALSE, offered again after {SECOND_OFFER_MS} ms: {}", if hr == S_FALSE { "refused" } else { "taken" }));
+                }
                 if hr == S_FALSE {
                     crate::log("show: the app refused the choice in OnFileOk (S_FALSE)");
                     self.st.borrow_mut().result = None;
@@ -334,6 +377,49 @@ mod com {
                 }
             }
             Ok(())
+        }
+    }
+
+    // WHY (issue 116, Twitch Downloader, a WPF app: "File gets saved with default suggested name (not the chosen path/name) in root
+    // of the app"). WPF's dialog code asks for the dialog's window in OnFileOk (`(IOleWindow)dialog`, the parent of its overwrite
+    // question) before it reads the result. Our object had no IOleWindow: the cast threw, OnFileOk failed, the failure was taken as
+    // "accepted" (Chrome answers E_NOTIMPL), and WPF, which had read nothing, gave the app the name the app had put in itself, with
+    // no folder. Windows' dialog object has the interface. While rustyfiles is picking, the "dialog window" is the app's own window
+    // that owns it; otherwise Windows' dialog answers.
+    impl windows::Win32::System::Ole::IOleWindow_Impl for Dialog_Impl {
+        fn GetWindow(&self) -> Result<HWND> {
+            trace("GetWindow");
+            if let Some(h) = self.st.borrow().showing_owner {
+                return Ok(HWND(h as *mut c_void));
+            }
+            unsafe { self.real.cast::<windows::Win32::System::Ole::IOleWindow>()?.GetWindow() }
+        }
+        fn ContextSensitiveHelp(&self, enter: WBOOL) -> Result<()> {
+            trace("ContextSensitiveHelp");
+            unsafe { self.real.cast::<windows::Win32::System::Ole::IOleWindow>()?.ContextSensitiveHelp(enter.as_bool()) }
+        }
+    }
+
+    // Windows' dialog object has these too; an app that asks for them gets them passed on.
+    impl IFileDialog2_Impl for Dialog_Impl {
+        fn SetCancelButtonLabel(&self, label: &PCWSTR) -> Result<()> {
+            trace("SetCancelButtonLabel");
+            unsafe { self.real.cast::<IFileDialog2>()?.SetCancelButtonLabel(*label) }
+        }
+        fn SetNavigationRoot(&self, psi: Ref<IShellItem>) -> Result<()> {
+            trace("SetNavigationRoot");
+            unsafe { self.real.cast::<IFileDialog2>()?.SetNavigationRoot(psi.ok()?) }
+        }
+    }
+
+    impl windows::Win32::System::Ole::IObjectWithSite_Impl for Dialog_Impl {
+        fn SetSite(&self, site: Ref<IUnknown>) -> Result<()> {
+            trace("SetSite");
+            unsafe { self.real.cast::<windows::Win32::System::Ole::IObjectWithSite>()?.SetSite(site.as_ref()) }
+        }
+        fn GetSite(&self, iid: *const GUID, out: *mut *mut c_void) -> Result<()> {
+            trace("GetSite");
+            unsafe { (Interface::vtable(&self.real.cast::<windows::Win32::System::Ole::IObjectWithSite>()?).GetSite)(Interface::as_raw(&self.real.cast::<windows::Win32::System::Ole::IObjectWithSite>()?), iid, out).ok() }
         }
     }
 
@@ -362,7 +448,11 @@ mod com {
         fn Advise(&self, sink: Ref<IFileDialogEvents>) -> Result<u32> {
             trace("Advise");
             let s = sink.ok()?;
-            let cookie = unsafe { self.real.Advise(s)? };
+            // Windows' dialog is given a relay: what it tells the sink names THIS object, the one the app holds (see `Relay`)
+            let me = self.to_interface::<IFileOpenDialog>().cast::<IFileDialog>()?;
+            let me_custom = self.to_interface::<IFileDialogCustomize>();
+            let relay: IFileDialogEvents = Relay { app: s.clone(), me: me.as_raw(), me_custom: me_custom.as_raw() }.into();
+            let cookie = unsafe { self.real.Advise(&relay)? };
             self.st.borrow_mut().sinks.push((cookie, s.clone()));
             Ok(cookie)
         }
@@ -547,6 +637,74 @@ mod com {
         }
     }
 
+    /// What Windows' dialog tells the app's event sink, passed on with the dialog the app holds (this wrapper) in place of Windows' own
+    /// object. An app that keeps its state per dialog (or compares the dialog it is told about with its own) did not recognise
+    /// Windows' object: issue 163, SolidWorks' "Save as PDF" (its own controls, so Windows' dialog was shown) failed with rustyfiles
+    /// installed. The custom controls' events (`IFileDialogControlEvents`) go the same way when the app's sink takes them.
+    ///
+    /// `me` and `me_custom` are not counted references: the wrapper owns Windows' dialog, which owns this relay, so the wrapper outlives
+    /// every call made here (a counted one would keep the three alive for ever).
+    #[implement(IFileDialogEvents, IFileDialogControlEvents)]
+    struct Relay {
+        app: IFileDialogEvents,
+        me: *mut c_void,
+        me_custom: *mut c_void,
+    }
+
+    /// An HRESULT as the `Result` of an implemented method, keeping a success code other than S_OK (an OnFileOk's S_FALSE refuses the
+    /// file).
+    fn pass(hr: HRESULT) -> Result<()> {
+        if hr == S_OK { Ok(()) } else { Err(windows::core::Error::from_hresult(hr)) }
+    }
+
+    impl IFileDialogEvents_Impl for Relay_Impl {
+        fn OnFileOk(&self, _: Ref<IFileDialog>) -> Result<()> {
+            pass(unsafe { (Interface::vtable(&self.app).OnFileOk)(Interface::as_raw(&self.app), self.me) })
+        }
+        fn OnFolderChanging(&self, _: Ref<IFileDialog>, folder: Ref<IShellItem>) -> Result<()> {
+            let f = folder.as_ref().map_or(std::ptr::null_mut(), Interface::as_raw);
+            pass(unsafe { (Interface::vtable(&self.app).OnFolderChanging)(Interface::as_raw(&self.app), self.me, f) })
+        }
+        fn OnFolderChange(&self, _: Ref<IFileDialog>) -> Result<()> {
+            pass(unsafe { (Interface::vtable(&self.app).OnFolderChange)(Interface::as_raw(&self.app), self.me) })
+        }
+        fn OnSelectionChange(&self, _: Ref<IFileDialog>) -> Result<()> {
+            pass(unsafe { (Interface::vtable(&self.app).OnSelectionChange)(Interface::as_raw(&self.app), self.me) })
+        }
+        fn OnShareViolation(&self, _: Ref<IFileDialog>, item: Ref<IShellItem>) -> Result<FDE_SHAREVIOLATION_RESPONSE> {
+            let i = item.as_ref().map_or(std::ptr::null_mut(), Interface::as_raw);
+            let mut r = FDE_SHAREVIOLATION_RESPONSE::default();
+            pass(unsafe { (Interface::vtable(&self.app).OnShareViolation)(Interface::as_raw(&self.app), self.me, i, &mut r) }).map(|_| r)
+        }
+        fn OnTypeChange(&self, _: Ref<IFileDialog>) -> Result<()> {
+            pass(unsafe { (Interface::vtable(&self.app).OnTypeChange)(Interface::as_raw(&self.app), self.me) })
+        }
+        fn OnOverwrite(&self, _: Ref<IFileDialog>, item: Ref<IShellItem>) -> Result<FDE_OVERWRITE_RESPONSE> {
+            let i = item.as_ref().map_or(std::ptr::null_mut(), Interface::as_raw);
+            let mut r = FDE_OVERWRITE_RESPONSE::default();
+            pass(unsafe { (Interface::vtable(&self.app).OnOverwrite)(Interface::as_raw(&self.app), self.me, i, &mut r) }).map(|_| r)
+        }
+    }
+
+    impl IFileDialogControlEvents_Impl for Relay_Impl {
+        fn OnItemSelected(&self, _: Ref<IFileDialogCustomize>, id: u32, item: u32) -> Result<()> {
+            let c: IFileDialogControlEvents = self.app.cast().map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_NOTIMPL))?;
+            pass(unsafe { (Interface::vtable(&c).OnItemSelected)(Interface::as_raw(&c), self.me_custom, id, item) })
+        }
+        fn OnButtonClicked(&self, _: Ref<IFileDialogCustomize>, id: u32) -> Result<()> {
+            let c: IFileDialogControlEvents = self.app.cast().map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_NOTIMPL))?;
+            pass(unsafe { (Interface::vtable(&c).OnButtonClicked)(Interface::as_raw(&c), self.me_custom, id) })
+        }
+        fn OnCheckButtonToggled(&self, _: Ref<IFileDialogCustomize>, id: u32, checked: WBOOL) -> Result<()> {
+            let c: IFileDialogControlEvents = self.app.cast().map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_NOTIMPL))?;
+            pass(unsafe { (Interface::vtable(&c).OnCheckButtonToggled)(Interface::as_raw(&c), self.me_custom, id, checked) })
+        }
+        fn OnControlActivating(&self, _: Ref<IFileDialogCustomize>, id: u32) -> Result<()> {
+            let c: IFileDialogControlEvents = self.app.cast().map_err(|_| windows::core::Error::from(windows::Win32::Foundation::E_NOTIMPL))?;
+            pass(unsafe { (Interface::vtable(&c).OnControlActivating)(Interface::as_raw(&c), self.me_custom, id) })
+        }
+    }
+
     /// Every control the app adds marks the dialog as one only Windows' own can show.
     macro_rules! custom {
         ($self:ident, $mark:expr, $call:expr) => {{
@@ -645,6 +803,142 @@ mod com {
         }
     }
 
+    #[cfg(test)]
+    pub(super) mod tests {
+        use super::*;
+        use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+
+        thread_local! {
+            /// What "rustyfiles" answers the next Show with.
+            pub static CANNED: RefCell<Option<crate::proto::Response>> = const { RefCell::new(None) };
+        }
+
+        /// An app's event sink that does in OnFileOk what WPF's dialog code does: it asks for the dialog's window first, then reads
+        /// the result.
+        #[implement(IFileDialogEvents)]
+        struct WpfLike {
+            got: std::rc::Rc<RefCell<Option<(isize, String)>>>,
+        }
+
+        #[allow(non_snake_case)]
+        impl IFileDialogEvents_Impl for WpfLike_Impl {
+            fn OnFileOk(&self, pfd: Ref<IFileDialog>) -> Result<()> {
+                let d = pfd.ok()?;
+                let window = unsafe { d.cast::<IOleWindow>()?.GetWindow()? };
+                let path = unsafe { d.GetResult()?.GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING)?.to_string()? };
+                *self.got.borrow_mut() = Some((window.0 as isize, path));
+                Ok(())
+            }
+            fn OnFolderChanging(&self, _: Ref<IFileDialog>, _: Ref<IShellItem>) -> Result<()> {
+                Ok(())
+            }
+            fn OnFolderChange(&self, _: Ref<IFileDialog>) -> Result<()> {
+                Ok(())
+            }
+            fn OnSelectionChange(&self, _: Ref<IFileDialog>) -> Result<()> {
+                Ok(())
+            }
+            fn OnShareViolation(&self, _: Ref<IFileDialog>, _: Ref<IShellItem>) -> Result<FDE_SHAREVIOLATION_RESPONSE> {
+                Ok(FDESVR_DEFAULT)
+            }
+            fn OnTypeChange(&self, _: Ref<IFileDialog>) -> Result<()> {
+                Ok(())
+            }
+            fn OnOverwrite(&self, _: Ref<IFileDialog>, _: Ref<IShellItem>) -> Result<FDE_OVERWRITE_RESPONSE> {
+                Ok(FDEOR_DEFAULT)
+            }
+        }
+
+        /// An app's sink that remembers which dialog it was told about, and refuses the file (S_FALSE) as an app that checks it does.
+        #[implement(IFileDialogEvents)]
+        struct Remembers {
+            told: std::rc::Rc<RefCell<Vec<*mut c_void>>>,
+        }
+
+        #[allow(non_snake_case)]
+        impl IFileDialogEvents_Impl for Remembers_Impl {
+            fn OnFileOk(&self, pfd: Ref<IFileDialog>) -> Result<()> {
+                self.told.borrow_mut().push(pfd.ok()?.as_raw());
+                Err(windows::core::Error::from_hresult(S_FALSE))
+            }
+            fn OnFolderChanging(&self, _: Ref<IFileDialog>, _: Ref<IShellItem>) -> Result<()> {
+                Ok(())
+            }
+            fn OnFolderChange(&self, _: Ref<IFileDialog>) -> Result<()> {
+                Ok(())
+            }
+            fn OnSelectionChange(&self, _: Ref<IFileDialog>) -> Result<()> {
+                Ok(())
+            }
+            fn OnShareViolation(&self, _: Ref<IFileDialog>, _: Ref<IShellItem>) -> Result<FDE_SHAREVIOLATION_RESPONSE> {
+                Ok(FDESVR_DEFAULT)
+            }
+            fn OnTypeChange(&self, pfd: Ref<IFileDialog>) -> Result<()> {
+                self.told.borrow_mut().push(pfd.ok()?.as_raw());
+                Ok(())
+            }
+            fn OnOverwrite(&self, _: Ref<IFileDialog>, _: Ref<IShellItem>) -> Result<FDE_OVERWRITE_RESPONSE> {
+                Ok(FDEOR_DEFAULT)
+            }
+        }
+
+        /// Issue 163: what Windows' dialog tells the app's sink names the dialog the app holds, and the app's answer comes back whole.
+        #[test]
+        fn windows_dialog_events_reach_the_app_with_its_own_dialog() {
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            }
+            let dialog: IFileSaveDialog = Dialog::new(true).unwrap().into();
+            let mine = dialog.cast::<IFileDialog>().unwrap();
+            let told = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let sink: IFileDialogEvents = Remembers { told: told.clone() }.into();
+            let theirs = real_dialog(&FileSaveDialog).unwrap();
+            let relay: IFileDialogEvents =
+                Relay { app: sink, me: mine.as_raw(), me_custom: dialog.cast::<IFileDialogCustomize>().unwrap().as_raw() }.into();
+            // Windows' dialog calls the relay with ITSELF
+            let ok = unsafe { (Interface::vtable(&relay).OnFileOk)(Interface::as_raw(&relay), Interface::as_raw(&theirs)) };
+            let _ = unsafe { relay.OnTypeChange(&theirs) };
+            assert_eq!(ok, S_FALSE, "the app's refusal reaches Windows' dialog");
+            assert_eq!(*told.borrow(), vec![mine.as_raw(), mine.as_raw()], "the app is told about the dialog it holds");
+            // and the dialog answers what Windows' does
+            assert!(dialog.cast::<IFileDialog2>().is_ok() && dialog.cast::<windows::Win32::System::Ole::IObjectWithSite>().is_ok());
+        }
+
+        #[test]
+        fn a_wpf_app_reads_the_picked_path_in_on_file_ok() {
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            }
+            let dialog: IFileSaveDialog = Dialog::new(true).unwrap().into();
+            let got = std::rc::Rc::new(RefCell::new(None));
+            let sink: IFileDialogEvents = WpfLike { got: got.clone() }.into();
+            unsafe {
+                dialog.Advise(&sink).unwrap();
+                dialog.SetFileName(w!("default name.mp4")).unwrap();
+            }
+            // (the temp folder by its long name: on a machine whose profile folder has a short alias, as GitHub's runners do
+            // (`RUNNER~1`), the shell item gives the path back long; issue 186)
+            let temp = std::env::temp_dir();
+            let temp = temp.canonicalize().map(|p| std::path::PathBuf::from(p.to_string_lossy().trim_start_matches(r"\\?\"))).unwrap_or(temp);
+            let picked = temp.join("rf-dialog-wpf-test.mp4").to_string_lossy().into_owned();
+            CANNED.with(|c| *c.borrow_mut() = Some(crate::proto::Response { ok: true, paths: vec![picked.clone()], filter_index: 1 }));
+            // (no owner window: the "dialog window" is then the null window, as the app's own would be)
+            unsafe { dialog.Show(None).unwrap() };
+            let (_, path) = got.borrow().clone().expect("OnFileOk ran and read the result");
+            assert_eq!(path, picked, "the app gets the path picked in rustyfiles, not its own default name");
+            // outside Show, Windows' dialog answers (it has no window: an error, not a stale owner)
+            let _ = unsafe { dialog.cast::<IOleWindow>().unwrap().GetWindow() };
+        }
+    }
+
+    /// Apps that get Windows' own dialog object, untouched (not wrapped), whatever they do with it.
+    /// * PickerHost.exe shows the dialog for packaged apps' FileSavePicker / FileOpenPicker (Snipping Tool's Save as). It drives
+    ///   Windows' dialog through a private interface ({9EA5491C-89C8-4BEF-93D3-7F665FB82A33}) we can't pass on, and fails the pick
+    ///   without it.
+    /// * SLDWORKS.exe: SolidWorks' "Save as PDF" failed with the wrapper in between, although Windows' dialog itself was shown (it adds
+    ///   its own controls) (issue 163: "Corrupts the ability of my CAD software from being able to save a drawing as a pdf").
+    const UNTOUCHED: [&str; 2] = ["PickerHost.exe", "SLDWORKS.exe"];
+
     #[implement(IClassFactory)]
     struct Factory {
         save: bool,
@@ -659,12 +953,9 @@ mod com {
             if outer.is_some() {
                 return Err(CLASS_E_NOAGGREGATION.into());
             }
-            // PickerHost.exe shows the dialog for packaged apps' FileSavePicker / FileOpenPicker
-            // (Snipping Tool's Save as). It drives Windows' dialog through a private interface
-            // ({9EA5491C-89C8-4BEF-93D3-7F665FB82A33}) we can't pass on, and fails the pick
-            // without it: it gets Windows' own dialog, untouched.
-            if exe_name().eq_ignore_ascii_case("PickerHost.exe") {
-                crate::log("create: PickerHost, Windows' dialog");
+            // some apps need Windows' own dialog object (see UNTOUCHED)
+            if let Some(app) = UNTOUCHED.iter().find(|a| exe_name().eq_ignore_ascii_case(a)) {
+                crate::log(&format!("create: {app}, Windows' dialog"));
                 let real = real_dialog(if self.save { &FileSaveDialog } else { &FileOpenDialog })?;
                 return unsafe { real.query(iid, object).ok() };
             }

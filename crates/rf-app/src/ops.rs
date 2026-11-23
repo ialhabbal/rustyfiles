@@ -187,12 +187,18 @@ impl FolderView {
 
     pub fn copy_to_clipboard(&mut self, kind: Transfer, _window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.location(), rf_core::Location::Shell { .. }) {
-            // items of a phone: copied out with the shell's engine; cut becomes copy
-            crate::shell_view::copy_items(cx, self.selection_shell());
+            // items of a phone: copied out with the shell's engine; a cut deletes them from the device once they were pasted
+            crate::shell_view::copy_items(cx, self.selection_shell(), kind == rf_win::fileops::Transfer::Move);
             return;
         }
         let paths = self.selection_paths();
         if paths.is_empty() {
+            return;
+        }
+        // items of an FTP server: as a phone's, fetched by Windows' engine into a temp folder and those copies put on the clipboard
+        // (issue 223: the clipboard got the `ftp://` addresses, which no paste can use)
+        if paths.first().is_some_and(|p| rf_win::ftp::is_ftp(p)) {
+            crate::shell_view::copy_ftp(cx, self.ftp_items(&paths), kind == Transfer::Move);
             return;
         }
         let in_archive = self.current_dir().is_some_and(|d| crate::archive_view::is_browsable_path(&d));
@@ -202,9 +208,14 @@ impl FolderView {
             crate::archive_view::copy_items(cx, paths);
             return;
         }
+        // a cut is drawn faded until it is pasted or the clipboard changes (issue 201); a copy ends an earlier cut's marks
+        crate::cut_marks::cutting((kind == Transfer::Move).then_some(paths.as_slice()));
+        cx.notify();
         // OpenClipboard can wait on other apps: never on the UI thread.
-        rf_win::sta::run(move |owner| {
-            if let Err(e) = rf_win::clipboard::set_files(owner, &paths, kind) {
+        rf_win::sta::run(move |owner| match rf_win::clipboard::set_files(owner, &paths, kind) {
+            Ok(_) => crate::cut_marks::written(&paths),
+            Err(e) => {
+                crate::cut_marks::cutting(None);
                 log::warn!("clipboard: {e:#}");
             }
         });
@@ -267,7 +278,112 @@ impl FolderView {
         .detach();
     }
 
+    /// FTP items of this listing as (address, is a folder), for the server's own operations.
+    pub(crate) fn ftp_items(&self, paths: &[PathBuf]) -> Vec<(String, bool)> {
+        paths
+            .iter()
+            .map(|p| {
+                let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let is_dir = self.entries.iter().any(|e| *e.name == *name && e.is_dir());
+                (p.to_string_lossy().replace('\\', "/"), is_dir)
+            })
+            .collect()
+    }
+
+    /// Delete on an FTP server: for good (it has no recycle bin), after asking; the server deletes, then the list is read again.
+    fn delete_on_ftp(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let items = self.ftp_items(&paths);
+        let what = if paths.len() == 1 { format!("\"{}\"", rf_core::history::display_name(&paths[0])) } else { crate::i18n::items(paths.len()) };
+        let view = cx.entity().downgrade();
+        crate::prompt::show(
+            t!("Kalıcı olarak silinsin mi?"),
+            Some(format!("{what} {}", t!("geri alınamayacak şekilde silinecek."))),
+            None,
+            vec![
+                crate::prompt::Button::new(t!("Sil"), crate::prompt::Kind::Danger, move |_, _, cx| {
+                    let (items, view) = (items.clone(), view.clone());
+                    let title = format!("{} {}", t!("Kalıcı olarak siliniyor:"), crate::i18n::items(items.len()));
+                    crate::status_center::start_with(
+                        cx,
+                        title,
+                        move |_| {
+                            for (url, is_dir) in &items {
+                                rf_win::ftp::delete(url, *is_dir)?;
+                            }
+                            Ok(true)
+                        },
+                        Some(Box::new(move |_, cx| {
+                            let _ = view.update(cx, |v, cx| v.refresh(cx));
+                        })),
+                    );
+                    Ok(())
+                }),
+                crate::prompt::Button::cancel(),
+            ],
+            window,
+            cx,
+        );
+    }
+
+    /// A shell folder's parsing name (a phone's folder): where a paste or a drop goes, through Windows' own engine (issue 221: the
+    /// phone's folders were read-only here).
+    pub(crate) fn shell_dest(&self) -> Option<PathBuf> {
+        match self.location() {
+            rf_core::Location::Shell { parsing, .. } => Some(PathBuf::from(parsing)),
+            _ => None,
+        }
+    }
+
+    /// The clipboard's files into the shell folder `dest` (a phone's), then the folder is read again (nothing watches it).
+    fn paste_into_shell(&mut self, dest: PathBuf, cx: &mut Context<Self>) {
+        let (tx, rx) = oneshot::channel();
+        rf_win::sta::run(move |owner| {
+            let _ = tx.send(rf_win::clipboard::get_files(owner).map_err(|e| log::warn!("paste: {e:#}")).ok().flatten());
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Some((paths, kind))) = rx.await else { return };
+            let _ = cx.update(|cx| {
+                crate::status_center::transfer_then(cx, kind, paths, dest, move |_, cx| {
+                    let _ = this.update(cx, |v, cx| v.refresh(cx));
+                })
+            });
+        })
+        .detach();
+    }
+
+    /// Delete in a shell folder (a phone's): there is no recycle bin there, so it is for good, after asking; Windows' engine does it.
+    fn delete_in_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let items = self.selection_shell();
+        if items.is_empty() {
+            return;
+        }
+        let what = if items.len() == 1 { format!("\"{}\"", items[0].name) } else { crate::i18n::items(items.len()) };
+        let paths: Vec<PathBuf> = items.iter().map(|c| c.fs_path.clone().unwrap_or_else(|| PathBuf::from(&c.parsing))).collect();
+        let view = cx.entity().downgrade();
+        crate::prompt::show(
+            t!("Kalıcı olarak silinsin mi?"),
+            Some(format!("{what} {}", t!("geri alınamayacak şekilde silinecek."))),
+            None,
+            vec![
+                crate::prompt::Button::new(t!("Sil"), crate::prompt::Kind::Danger, move |_, _, cx| {
+                    let view = view.clone();
+                    crate::status_center::delete_in_shell(cx, paths.clone(), move |cx| {
+                        let _ = view.update(cx, |v, cx| v.refresh(cx));
+                    });
+                    Ok(())
+                }),
+                crate::prompt::Button::cancel(),
+            ],
+            window,
+            cx,
+        );
+    }
+
     pub fn paste(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(dest) = self.shell_dest() {
+            self.paste_into_shell(dest, cx);
+            return;
+        }
         if self.shell_read_only(cx) {
             return;
         }
@@ -335,8 +451,9 @@ impl FolderView {
             cx.spawn(async move |this, cx| {
                 if let Ok(Some((paths, _))) = rx.await {
                     let work = cx.background_spawn(async move {
-                        for p in paths.iter().filter(|p| p.is_file()) {
-                            if let Err(e) = rf_win::ftp::upload(p, &url) {
+                        // (folders with all they hold)
+                        for p in &paths {
+                            if let Err(e) = rf_win::ftp::upload_tree(p, &url) {
                                 log::warn!("ftp upload {p:?}: {e}");
                             }
                         }
@@ -353,6 +470,32 @@ impl FolderView {
             // No files with paths: files that live only in the program that copied them (a remote desktop session, a tool that
             // carries the clipboard between PCs) are pasted from that program's own data (`rf_win::vfiles`).
             if clip.is_none() && !rf_win::vfiles::clipboard_has() {
+                let _ = cx.update(|cx| {
+                    let item = cx.read_from_clipboard();
+                    let text = item.as_ref().and_then(|c| c.text());
+                    // a link on the clipboard, with HyperDownload installed: offered for download into this folder
+                    if let Some(link) = text.as_deref().map(str::trim).filter(|t| crate::hyperdownload::is_link(t))
+                        && crate::addons::installed(crate::hyperdownload::ID).is_some()
+                    {
+                        crate::hyperdownload::offer_pasted_link(link.to_string(), dir.clone(), cx);
+                        return;
+                    }
+                    // text or a picture: a file of it here, with the rename box on it (issue 151)
+                    let image = item.as_ref().and_then(|c| {
+                        c.entries().iter().find_map(|e| match e {
+                            ClipboardEntry::Image(i) => Some(i.clone()),
+                            _ => None,
+                        })
+                    });
+                    let made = match (text.filter(|t| !t.trim().is_empty()), image) {
+                        (Some(t), _) => Some(Pasted::Text(t)),
+                        (None, Some(i)) => Some(Pasted::Image(i)),
+                        _ => None,
+                    };
+                    if let Some(made) = made {
+                        paste_as_file(made, dir.clone(), this.clone(), cx);
+                    }
+                });
                 return;
             }
             let _ = cx.update(|cx| {
@@ -375,9 +518,55 @@ impl FolderView {
         .detach();
     }
 
+    /// Copies of the selected items beside them ("x - Kopya", as a paste into the same folder names them); the copy of a single item
+    /// gets the rename box at once (issue 161).
+    pub fn duplicate_selected(&mut self, cx: &mut Context<Self>) {
+        if self.shell_read_only(cx) {
+            return;
+        }
+        let Some(dir) = self.current_dir() else { return };
+        if rf_win::ftp::is_ftp(&dir) || crate::archive_view::split(&dir).is_some() {
+            return;
+        }
+        let paths = self.selection_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let this = cx.entity().downgrade();
+        let here = dir.clone();
+        crate::status_center::transfer_then(cx, Transfer::Copy, paths, dir, move |arrived, cx| {
+            let mut names: Vec<String> = arrived.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).collect();
+            let _ = this.update(cx, |v, cx| {
+                if v.current_dir().as_deref() != Some(here.as_path()) {
+                    return;
+                }
+                if names.len() == 1 {
+                    v.expect_new_item(names.pop(), cx);
+                } else {
+                    v.select_when_listed(names, cx);
+                }
+            });
+        });
+    }
+
+    /// The selection into the other pane of a split tab (issue 152); nothing in a tab that is not split or inside an archive.
+    pub fn to_other_pane(&mut self, kind: Transfer, cx: &mut Context<Self>) {
+        if !self.dual || self.renaming.is_some() {
+            return;
+        }
+        if self.current_dir().is_some_and(|d| crate::archive_view::split(&d).is_some()) {
+            return;
+        }
+        let paths = self.selection_paths();
+        if !paths.is_empty() {
+            cx.emit(crate::folder_view::FolderEvent::ToOtherPane(kind, paths));
+        }
+    }
+
     /// Deletes the selection, asking first per Settings → "Confirm before deleting".
     pub fn delete_selected(&mut self, permanent: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.shell_read_only(cx) {
+        if self.shell_dest().is_some() {
+            self.delete_in_shell(window, cx);
             return;
         }
         let paths = self.selection_paths();
@@ -389,6 +578,10 @@ impl FolderView {
     pub fn delete_paths(&mut self, paths: Vec<PathBuf>, permanent: bool, window: &mut Window, cx: &mut Context<Self>) {
         use crate::settings::DeletePref;
         if paths.is_empty() {
+            return;
+        }
+        if rf_win::ftp::is_ftp(&paths[0]) {
+            self.delete_on_ftp(paths, window, cx);
             return;
         }
         // inside an archive: remove the entries from it (always asks: there is no recycle bin).
@@ -418,13 +611,30 @@ impl FolderView {
             );
             return;
         }
+        // A WSL drive or a network share has no Recycle Bin: Delete there is a permanent delete, asked with our own question (Windows'
+        // engine would ask its own "permanently delete?" instead: two different dialogs for the same thing, Discord 2026-11-23)
+        let permanent = permanent || rf_win::localized::is_network(&paths[0]);
         let ask = match cx.global::<crate::settings::Settings>().confirm_delete {
             DeletePref::Always => true,
             DeletePref::PermanentOnly => permanent,
             DeletePref::Never => false,
         };
+        // a WSL distribution's folder sends no change notices: the view is read again when the deletion is over (Discord, 2026-11-23:
+        // "After deleting files from a WSL drive, they remain visible")
+        let view = cx.entity().downgrade();
+        let unwatched = paths.first().is_some_and(|p| rf_win::fastcopy::on_wsl(p));
+        let run = move |cx: &mut App, paths: Vec<PathBuf>| {
+            if unwatched {
+                let view = view.clone();
+                crate::status_center::delete_then(cx, paths, permanent, move |cx| {
+                    let _ = view.update(cx, |v, cx| v.soft_reload(cx));
+                });
+            } else {
+                crate::status_center::delete(cx, paths, permanent);
+            }
+        };
         if !ask {
-            crate::status_center::delete(cx, paths, permanent);
+            run(cx, paths);
             return;
         }
         let what = if paths.len() == 1 {
@@ -443,7 +653,7 @@ impl FolderView {
             None,
             vec![
                 crate::prompt::Button::new(t!("Sil"), if permanent { crate::prompt::Kind::Danger } else { crate::prompt::Kind::Primary }, move |_, _, cx| {
-                    crate::status_center::delete(cx, paths.clone(), permanent);
+                    run(cx, paths.clone());
                     Ok(())
                 }),
                 crate::prompt::Button::cancel(),
@@ -478,6 +688,40 @@ impl FolderView {
             return;
         }
         let name = if folder { t!("Yeni klasör") } else { t!("Yeni metin belgesi") }.to_string();
+        // on an FTP server: the server makes the folder, an empty file is uploaded (issue 223); then the rename box, as anywhere
+        if rf_win::ftp::is_ftp(&dir) {
+            let taken: Vec<String> = self.entries.iter().map(|e| e.name.to_lowercase()).collect();
+            let ext = if folder { "" } else { ".txt" };
+            let mut pick = format!("{name}{ext}");
+            let mut n = 2;
+            while taken.contains(&pick.to_lowercase()) {
+                pick = format!("{name} ({n}){ext}");
+                n += 1;
+            }
+            let url = dir.to_string_lossy().replace('\\', "/");
+            let made = pick.clone();
+            let task = cx.background_spawn(async move {
+                if folder {
+                    return rf_win::ftp::make_dir(&url, &made);
+                }
+                let tmp = std::env::temp_dir().join(format!("rustyfiles-new-{}", std::process::id()));
+                std::fs::create_dir_all(&tmp)?;
+                let file = tmp.join(&made);
+                std::fs::write(&file, b"")?;
+                let r = rf_win::ftp::upload(&file, &url);
+                let _ = std::fs::remove_file(&file);
+                r
+            });
+            cx.spawn(async move |this, cx| {
+                if let Err(e) = task.await {
+                    log::warn!("ftp: new item: {e}");
+                    return;
+                }
+                let _ = this.update(cx, |v, cx| v.expect_new_item(Some(pick), cx));
+            })
+            .detach();
+            return;
+        }
         let task = cx.background_spawn(async move {
             if folder { fileops::new_folder(&dir, &name) } else { fileops::new_text_file(&dir, &name) }
         });
@@ -567,6 +811,13 @@ impl FolderView {
         cx.notify();
     }
 
+    /// Applies the name in the rename box, when one is open (a press outside it).
+    pub fn commit_rename_if_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.renaming.is_some() {
+            self.commit_rename(window, cx);
+        }
+    }
+
     pub fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.set_renaming(None, None);
         window.focus(&self.focus, cx);
@@ -613,6 +864,13 @@ impl FolderView {
                 return;
             }
         }
+        // still being copied here: the copy would go on under the old name (issue 297)
+        if !new_name.is_empty() && new_name != old && self.parent_of(ei).is_some_and(|d| crate::status_center::still_arriving(&d.join(&old))) {
+            let msg = format!("{old}\n\n{}", crate::t!("Bu öğe hâlâ kopyalanıyor. Kopyalama bitince yeniden adlandırın."));
+            crate::prompt::notice(crate::t!("Yeniden adlandır").to_string(), msg, window, cx);
+            cx.notify();
+            return;
+        }
         if !new_name.is_empty() && new_name != old {
             if let Some(dir) = self.parent_of(ei).map(|d| d.to_path_buf()) {
                 let from = dir.join(&old);
@@ -656,11 +914,18 @@ impl FolderView {
                         return;
                     }
                     let (tx, rx) = oneshot::channel::<anyhow::Result<bool>>();
+                    let ftp = rf_win::ftp::is_ftp(&f2);
                     bg("rename", move || {
-                        let _ = tx.send(fileops::rename(&f2, &n2));
+                        // (an FTP server's item: the server renames it, issue 223)
+                        let r = if ftp { rf_win::ftp::rename(&f2.to_string_lossy(), &n2).map(|()| true).map_err(Into::into) } else { fileops::rename(&f2, &n2) };
+                        let _ = tx.send(r);
                         Ok(true)
                     });
                     match rx.await {
+                        Ok(Ok(true)) if ftp => {
+                            // nothing watches a server: the list is read again
+                            let _ = this.update(cx, |v, cx| v.refresh(cx));
+                        }
                         Ok(Ok(true)) => {
                             crate::undo::push(crate::undo::UndoOp::Renamed { from: from.clone(), to: to.clone() });
                             let _ = cx.update(|cx| {
@@ -852,8 +1117,44 @@ impl FolderView {
                 return;
             }
         }
+        // An FTP server's items: Windows' FTP folder hands them over as virtual files too (and our own windows take none), so up to
+        // the same size they are downloaded first and dragged as real files that may only be copied (issue 223).
+        if items.first().is_some_and(|p| rf_win::ftp::is_ftp(p)) {
+            let bytes: u64 = self.selected.iter().filter_map(|&i| self.entries.get(i as usize)).map(|e| e.size).sum();
+            if bytes <= DRAG_EXTRACT_MAX {
+                drag_ftp_items_out(self.ftp_items(&items));
+                return;
+            }
+        }
         drag_paths_out(items);
     }
+}
+
+/// [`drag_paths_out`] for items of an FTP server: downloaded on a thread of their own into a temp folder first, then dragged as real
+/// files that may only be copied.
+fn drag_ftp_items_out(items: Vec<(String, bool)>) {
+    let ui_thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    unsafe {
+        let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+    }
+    std::thread::spawn(move || {
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dest = crate::archive_view::temp_root().join(format!("ftp-{stamp:x}"));
+        let real: std::io::Result<Vec<PathBuf>> =
+            std::fs::create_dir_all(&dest).and_then(|()| items.iter().map(|(url, is_dir)| rf_win::ftp::download_into(url, *is_dir, &dest)).collect());
+        let real = match real {
+            Ok(r) => r,
+            Err(e) => {
+                log::warn!("drag: could not download from the server: {e}");
+                return;
+            }
+        };
+        rf_win::sta::run(move |owner| {
+            if let Err(e) = rf_win::dnd::drag_out_copy_only(owner, ui_thread, &real) {
+                log::warn!("drag: {e:#}");
+            }
+        });
+    });
 }
 
 /// The most a drag out of an archive extracts before it starts (the button is held meanwhile); a larger selection is dragged the old
@@ -862,6 +1163,50 @@ const DRAG_EXTRACT_MAX: u64 = 256 << 20;
 
 /// [`drag_paths_out`] for members of an archive: extracted on a thread of their own first (the window does not wait), then dragged
 /// as real files that may only be copied. A button let go before the extraction ended starts no drag (see `rf_win::dnd::drag_out`).
+/// What the clipboard held when it had no files: text, or a picture.
+enum Pasted {
+    Text(String),
+    Image(Image),
+}
+
+/// Writes the clipboard's text or picture into `dir` as a new file ("Yapıştırılan metin.txt", "Yapıştırılan resim.png"; a picture that
+/// came as a bitmap is saved as PNG), then selects it with its rename box open, as a new file is.
+fn paste_as_file(what: Pasted, dir: PathBuf, view: WeakEntity<FolderView>, cx: &mut App) {
+    let task = cx.background_spawn(async move {
+        let (stem, ext, bytes) = match what {
+            Pasted::Text(t) => (t!("Yapıştırılan metin"), ".txt".to_string(), t.into_bytes()),
+            Pasted::Image(i) => {
+                let (ext, bytes) = match i.format {
+                    ImageFormat::Png => ("png", i.bytes.clone()),
+                    ImageFormat::Jpeg => ("jpg", i.bytes.clone()),
+                    ImageFormat::Gif => ("gif", i.bytes.clone()),
+                    ImageFormat::Svg => ("svg", i.bytes.clone()),
+                    ImageFormat::Webp => ("webp", i.bytes.clone()),
+                    // (a bitmap: PNG keeps it whole at a fraction of the size)
+                    _ => {
+                        let mut png = Vec::new();
+                        image::load_from_memory(&i.bytes)?.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+                        ("png", png)
+                    }
+                };
+                (t!("Yapıştırılan resim"), format!(".{ext}"), bytes)
+            }
+        };
+        let path = fileops::unique_name(&dir, stem, &ext);
+        std::fs::OpenOptions::new().write(true).create_new(true).open(&path).and_then(|mut f| std::io::Write::write_all(&mut f, &bytes))?;
+        anyhow::Ok(path)
+    });
+    cx.spawn(async move |cx| match task.await {
+        Ok(path) => {
+            crate::undo::push(crate::undo::UndoOp::Created { path: path.clone() });
+            let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            let _ = view.update(cx, |v, cx| v.expect_new_item(name, cx));
+        }
+        Err(e) => log::warn!("paste as a file: {e:#}"),
+    })
+    .detach();
+}
+
 pub(crate) fn drag_archive_items_out(items: Vec<PathBuf>) {
     let ui_thread = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
     unsafe {

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as L;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_kit::component::{Icon, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -59,6 +60,9 @@ pub enum Item {
         label: SharedString,
         icon: MenuIcon,
         items: Sub,
+        /// What a click on the row itself does (the submenu still opens on hover and with the right arrow). "Sıkıştır" compresses
+        /// in the default format with a click (Discord: "be able to just click compress from the get-go").
+        click: Option<Run>,
     },
     Separator,
 }
@@ -68,7 +72,11 @@ impl Item {
         Item::Action { label: label.into(), icon, hint: None, enabled: true, checked: false, run: Rc::new(run) }
     }
     pub fn sub(label: impl Into<SharedString>, icon: MenuIcon, items: Vec<Item>) -> Self {
-        Item::Sub { label: label.into(), icon, items: Sub::Items(Rc::new(items)) }
+        Item::Sub { label: label.into(), icon, items: Sub::Items(Rc::new(items)), click: None }
+    }
+    /// A submenu whose row does `run` when it is clicked.
+    pub fn sub_click(label: impl Into<SharedString>, icon: MenuIcon, items: Vec<Item>, run: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        Item::Sub { label: label.into(), icon, items: Sub::Items(Rc::new(items)), click: Some(Rc::new(run)) }
     }
     pub fn hint(mut self, h: impl Into<SharedString>) -> Self {
         if let Item::Action { hint, .. } = &mut self {
@@ -151,8 +159,14 @@ pub struct MenuView {
     /// The menu was opened from a window that shows glass (or from a popup that does): the liquid look, whose rows have other
     /// measures, so the layout reads it too.
     liquid: bool,
+    /// File-list context menus use Explorer's opaque Fluent treatment when that theme is enabled.
+    explorer_context: bool,
+    /// Some popups borrow the Explorer surface while keeping the app's original icons.
+    original_icons: bool,
     /// The highlight capsule of each level (keyed by the path of open submenus that leads to it), drawn at every paint of that level.
     glides: RefCell<BTreeMap<Vec<usize>, Glide>>,
+    /// The scroll of each level's list (a level taller than the screen scrolls): a submenu opens beside its row where the row is now.
+    scrolls: RefCell<Vec<ScrollHandle>>,
 }
 
 /// Popup mode: each level is a borderless Acrylic window (the material of Windows 11 menus),
@@ -202,7 +216,22 @@ fn host(cx: &App) -> Option<HostState> {
 
 /// Opens `menu` at `pos` (window coordinates), replacing any open menu.
 pub fn show(menu: Menu, pos: Point<Pixels>, window: &mut Window, cx: &mut App) -> Entity<MenuView> {
-    show_ex(menu, pos, None, window, cx)
+    show_ex(menu, pos, None, false, false, window, cx)
+}
+
+/// Opens a file-list context menu, using the Windows Explorer presentation when its icon
+/// theme is enabled. Other app menus keep their existing appearance.
+pub fn show_context(menu: Menu, pos: Point<Pixels>, window: &mut Window, cx: &mut App) -> Entity<MenuView> {
+    let explorer_context = cx.global::<crate::settings::Settings>().windows_file_explorer_theme;
+    let liquid = explorer_context.then_some(false);
+    show_ex(menu, pos, liquid, explorer_context, false, window, cx)
+}
+
+/// Explorer's opaque menu surface with the original app icons.
+pub fn show_context_original_icons(menu: Menu, pos: Point<Pixels>, window: &mut Window, cx: &mut App) -> Entity<MenuView> {
+    let explorer_context = cx.global::<crate::settings::Settings>().windows_file_explorer_theme;
+    let liquid = explorer_context.then_some(false);
+    show_ex(menu, pos, liquid, explorer_context, true, window, cx)
 }
 
 /// [`show`] on HyperGlass whatever the window under it shows: for the desktop, whose menus stand among the Dock's (glass) islands and
@@ -210,10 +239,18 @@ pub fn show(menu: Menu, pos: Point<Pixels>, window: &mut Window, cx: &mut App) -
 /// "masaüstüne sağ tıklayınca açılan kutu hyperglass değil?"). Where Windows gives no materials the menu stays plain.
 pub fn show_on_glass(menu: Menu, pos: Point<Pixels>, window: &mut Window, cx: &mut App) -> Entity<MenuView> {
     let glass = crate::settings::materials_available();
-    show_ex(menu, pos, Some(glass), window, cx)
+    show_ex(menu, pos, Some(glass), false, false, window, cx)
 }
 
-fn show_ex(menu: Menu, pos: Point<Pixels>, liquid: Option<bool>, window: &mut Window, cx: &mut App) -> Entity<MenuView> {
+fn show_ex(
+    menu: Menu,
+    pos: Point<Pixels>,
+    liquid: Option<bool>,
+    explorer_context: bool,
+    original_icons: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<MenuView> {
     if host(cx).is_some() {
         close(window, cx);
     }
@@ -231,7 +268,10 @@ fn show_ex(menu: Menu, pos: Point<Pixels>, liquid: Option<bool>, window: &mut Wi
         focus: cx.focus_handle(),
         popup: None,
         liquid: liquid.unwrap_or_else(|| crate::glass::liquid(crate::look::window::hwnd_of(window))),
+        explorer_context,
+        original_icons,
         glides: RefCell::new(BTreeMap::new()),
+        scrolls: RefCell::new(Vec::new()),
     });
 
     // Acrylic popups (Windows 11); RF_INWINDOW_MENU=1 or a failure falls back to drawing the
@@ -357,6 +397,12 @@ pub fn close(window: &mut Window, cx: &mut App) {
         for w in wins {
             let _ = w.update(cx, |_, window, _| window.remove_window());
         }
+        // A menu opened meanwhile (a right click on another file while this one was open, which closes this one first): the app's
+        // window is not activated again, that took the new menu's windows out of the front and so closed the new menu at once
+        // (issue 203: "Right-clicking on another file ... only dismisses the previous context menu").
+        if host(cx).is_some() {
+            return;
+        }
         let _ = h.main.update(cx, |_, window, cx| {
             window.activate_window();
             if let Some(f) = &h.restore {
@@ -382,7 +428,7 @@ fn run_in_main(run: Run, window: &mut Window, cx: &mut App) {
 /// Opens / rebuilds / closes level windows to match the menu state. False if the root popup
 /// could not be created.
 fn sync_popups(view: &Entity<MenuView>, cx: &mut App) -> bool {
-    let (wanted, have, dark, liquid, display) = {
+    let (wanted, have, dark, liquid, display, explorer_context) = {
         let m = view.read(cx);
         let Some(pp) = &m.popup else { return false };
         let display = pp.display;
@@ -393,7 +439,14 @@ fn sync_popups(view: &Entity<MenuView>, cx: &mut App) -> bool {
             .map(|(lv, r)| LevelKey { root_gen: m.root_gen, path: m.open[..lv].to_vec(), bounds: *r })
             .collect();
         let have: Vec<(AnyWindowHandle, LevelKey)> = pp.wins.borrow().clone();
-        (wanted, have, matches!(cx.window_appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark), m.liquid, display)
+        (
+            wanted,
+            have,
+            matches!(cx.window_appearance(), WindowAppearance::Dark | WindowAppearance::VibrantDark),
+            m.liquid,
+            display,
+            m.explorer_context,
+        )
     };
     let dark = match crate::settings::theme_override() {
         crate::settings::ThemePref::Light => false,
@@ -405,7 +458,7 @@ fn sync_popups(view: &Entity<MenuView>, cx: &mut App) -> bool {
     // open the new ones first (so focus moves to a menu window, never to nothing), then drop
     // the stale ones
     for (lv, key) in wanted.iter().enumerate().skip(keep) {
-        match open_level(view.clone(), lv, key.bounds, lv == 0, dark, liquid, display, cx) {
+        match open_level(view.clone(), lv, key.bounds, lv == 0, dark, liquid, display, explorer_context, cx) {
             Some(h) => wins.push((h, key.clone())),
             None if lv == 0 => return false,
             None => break,
@@ -434,6 +487,7 @@ fn open_level(
     dark: bool,
     liquid: bool,
     display: Option<DisplayId>,
+    explorer_context: bool,
     cx: &mut App,
 ) -> Option<AnyWindowHandle> {
     let opts = WindowOptions {
@@ -446,8 +500,8 @@ fn open_level(
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,
-        // over glass the window is see-through and the glass engine draws behind it (the view paints its own fill until it does)
-        window_background: theme::popup_material(liquid),
+        // Explorer context menus paint their own opaque surface; other popups keep their chosen material.
+        window_background: if explorer_context { WindowBackgroundAppearance::Opaque } else { theme::popup_material(liquid) },
         ..Default::default()
     };
     let r = cx.open_window(opts, move |w, cx| {
@@ -458,7 +512,7 @@ fn open_level(
                 crate::glass::keep_out_of_capture(h.hwnd.get());
             }
         }
-        cx.new(|cx| LevelView::new(view, level, liquid.then_some(dark), w, cx))
+        cx.new(|cx| LevelView::new(view, level, liquid.then_some(dark), explorer_context, w, cx))
     });
     match r {
         Ok(h) => Some(h.into()),
@@ -473,6 +527,7 @@ fn open_level(
 struct LevelView {
     menu: Entity<MenuView>,
     level: usize,
+    explorer_context: bool,
     focus: FocusHandle,
     /// The glass behind this level's window, in the liquid look.
     glass: Option<PopupGlass>,
@@ -482,7 +537,14 @@ struct LevelView {
 
 impl LevelView {
     /// `liquid`: `Some(dark)` to sit on glass, `None` for the Acrylic window.
-    fn new(menu: Entity<MenuView>, level: usize, liquid: Option<bool>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        menu: Entity<MenuView>,
+        level: usize,
+        liquid: Option<bool>,
+        explorer_context: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let subs = vec![
             cx.observe(&menu, |_, _, cx| cx.notify()),
             // clicking anywhere outside the menu's windows closes it
@@ -507,7 +569,7 @@ impl LevelView {
         }
         let glass = liquid.map(|dark| PopupGlass::start(crate::look::window::hwnd_of(window), dark));
         let watch = glass.is_some().then(|| glass_watch::watch(cx, |this: &mut Self| this.glass.as_mut()));
-        Self { menu, level, focus, glass, _watch: watch, _subs: subs }
+        Self { menu, level, explorer_context, focus, glass, _watch: watch, _subs: subs }
     }
 }
 
@@ -524,11 +586,14 @@ impl Render for LevelView {
         if self.menu.read(cx).glide_busy(level) {
             window.request_animation_frame();
         }
-        // over glass a wash, or the plain fill until the glass runs (never a see-through panel with nothing behind it)
-        let fill = self.glass.as_ref().map(|g| glass_watch::panel_fill(p.dark, g.fallback())).or_else(|| theme::popup_fill(&p));
-        div()
-            .size_full()
-            .when_some(fill, |d, f| d.bg(f))
+        // Explorer uses a consistent opaque surface; the other popup modes keep their material.
+        let surface = if self.explorer_context {
+            div().size_full().rounded(theme::RADIUS).bg(p.card_bg).border_1().border_color(p.border).shadow_lg()
+        } else {
+            let fill = self.glass.as_ref().map(|g| glass_watch::panel_fill(p.dark, g.fallback())).or_else(|| theme::popup_fill(&p));
+            div().size_full().when_some(fill, |d, f| d.bg(f))
+        };
+        surface
             .track_focus(&self.focus)
             .text_color(p.text)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
@@ -666,10 +731,16 @@ impl MenuView {
     }
 
     fn activate(&mut self, level: usize, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.activate_as(level, ix, false, window, cx)
+    }
+
+    /// `open_sub`: a submenu row opens its submenu even when a click on it does something (the right arrow).
+    fn activate_as(&mut self, level: usize, ix: usize, open_sub: bool, window: &mut Window, cx: &mut Context<Self>) {
         let levels = self.levels();
         let Some(item) = levels.get(level).and_then(|l| l.get(ix)).cloned() else { return };
         match item {
             Item::Action { enabled: true, run, .. } => run_in_main(run, window, cx),
+            Item::Sub { click: Some(run), .. } if !open_sub => run_in_main(run, window, cx),
             Item::Sub { .. } => {
                 self.open.truncate(level);
                 self.open.push(ix);
@@ -746,7 +817,7 @@ impl MenuView {
                 if let Some((lv, ix)) = self.hl {
                     let is_sub = self.levels().get(lv).and_then(|l| l.get(ix)).is_some_and(|i| matches!(i, Item::Sub { .. }));
                     if is_sub {
-                        self.activate(lv, ix, window, cx);
+                        self.activate_as(lv, ix, true, window, cx);
                     }
                 }
             }
@@ -769,14 +840,23 @@ impl MenuView {
     }
 
     fn render_quick(&self, p: &Palette, cx: &mut Context<Self>) -> AnyElement {
-        let mut row = h_flex().h(px(QUICK_H - 1.)).px_1().gap_1().items_center();
+        let explorer_toolbar = self.explorer_context && self.quick.len() >= 4;
+        let mut row = h_flex().h(px(QUICK_H - 1.)).px_1().items_center();
+        if explorer_toolbar {
+            row = row.w_full();
+        } else {
+            row = row.gap_1();
+        }
         for (i, q) in self.quick.iter().enumerate() {
             let run = q.run.clone();
             let tip = q.tip.clone();
+            let icon = q.icon;
+            let tint = (!self.original_icons && self.explorer_context).then(|| explorer_icon_color(icon, p.dark)).flatten();
             row = row.child(
                 div()
                     .id(("mq", i))
-                    .w(px(36.))
+                    .when(explorer_toolbar, |d| d.flex_1())
+                    .when(!explorer_toolbar, |d| d.w(px(36.)))
                     .h(px(32.))
                     .flex()
                     .items_center()
@@ -789,8 +869,17 @@ impl MenuView {
                             .active(|s| s.bg(p.pressed))
                             .on_click(cx.listener(move |_, _, window, cx| run_in_main(run.clone(), window, cx)))
                     })
-                    .child(Icon::new(q.icon).size(px(16.))),
+                    .child(if self.original_icons {
+                        Icon::new(q.icon).size(px(16.)).into_any_element()
+                    } else if self.explorer_context {
+                        lucide_menu_icon(icon, true, false, tint)
+                    } else {
+                        Icon::new(q.icon).size(px(16.)).into_any_element()
+                    }),
             );
+            if explorer_toolbar && i + 1 < self.quick.len() {
+                row = row.child(div().w(px(1.)).h(px(30.)).bg(p.divider));
+            }
         }
         v_flex().child(row).child(div().h(px(1.)).mx(px(-liquid::metrics(self.liquid).pad_x)).bg(p.divider)).into_any_element()
     }
@@ -838,8 +927,11 @@ impl MenuView {
         let highlighted = self.hl == Some((level, ix)) || self.open.get(level) == Some(&ix);
         let m = liquid::metrics(self.liquid);
         match item {
+            // (no row shrinks: in a level that scrolls, the list squeezed its rows to fit instead, and a submenu then opened beside
+            // where its row would have been; issue 175)
             Item::Separator => div()
                 .h(px(m.sep_h))
+                .flex_shrink_0()
                 .flex()
                 .items_center()
                 .child(div().h(px(1.)).flex_1().mx(px(m.sep_inset)).bg(p.divider))
@@ -848,13 +940,34 @@ impl MenuView {
                 let enabled = *enabled;
                 let content = if self.liquid {
                     // the tick is in the leading column and the icon keeps its place after it
-                    row_content(label.clone(), icon.clone(), hint.clone(), false, enabled, liquid::tick_slot(column, *checked), p)
+                    row_content(
+                        label.clone(),
+                        icon.clone(),
+                        hint.clone(),
+                        false,
+                        enabled,
+                        liquid::tick_slot(column, *checked),
+                        p,
+                        self.explorer_context,
+                        self.original_icons,
+                    )
                 } else {
-                    row_content(label.clone(), if *checked { MenuIcon::Lucide(L::Check) } else { icon.clone() }, hint.clone(), false, enabled, liquid::TickSlot::None, p)
+                    row_content(
+                        label.clone(),
+                        if *checked { MenuIcon::Lucide(L::Check) } else { icon.clone() },
+                        hint.clone(),
+                        false,
+                        enabled,
+                        liquid::TickSlot::None,
+                        p,
+                        self.explorer_context,
+                        self.original_icons,
+                    )
                 };
                 div()
                     .id(("mr", level * 1000 + ix))
                     .h(px(m.row_h))
+                    .flex_shrink_0()
                     // (the liquid highlight is the capsule behind the rows, not a fill of the row)
                     .when(!self.liquid, |d| d.rounded(px(4.)).when(highlighted && enabled, |d| d.bg(p.hover)).when(enabled, |d| d.active(|s| s.bg(p.pressed))))
                     .on_hover(cx.listener(move |m, on: &bool, _, cx| {
@@ -869,6 +982,7 @@ impl MenuView {
             Item::Sub { label, icon, .. } => div()
                 .id(("mr", level * 1000 + ix))
                 .h(px(m.row_h))
+                .flex_shrink_0()
                 .when(!self.liquid, |d| d.rounded(px(4.)).when(highlighted, |d| d.bg(p.hover)))
                 .on_hover(cx.listener(move |m, on: &bool, _, cx| {
                     if *on {
@@ -876,22 +990,65 @@ impl MenuView {
                     }
                 }))
                 .on_click(cx.listener(move |m, _, window, cx| m.activate(level, ix, window, cx)))
-                .child(row_content(label.clone(), icon.clone(), None, true, true, liquid::tick_slot(column, false), p))
+                .child(row_content(
+                    label.clone(),
+                    icon.clone(),
+                    None,
+                    true,
+                    true,
+                    liquid::tick_slot(column, false),
+                    p,
+                    self.explorer_context,
+                    self.original_icons,
+                ))
                 .into_any_element(),
         }
     }
+}
+
+fn explorer_icon_color(icon: L, dark: bool) -> Option<Hsla> {
+    let color = match icon {
+        L::Scissors | L::Copy | L::ClipboardCopy | L::ClipboardPaste | L::Share2 | L::Link | L::CirclePlus | L::SquareArrowOutUpRight
+        | L::TextCursorInput | L::PencilLine => {
+            if dark { 0x60CDFF } else { 0x0067C0 }
+        }
+        L::Folder | L::FolderOpen | L::FolderDown | L::FolderInput | L::FolderOutput | L::FolderTree => {
+            if dark { 0xF0C75E } else { 0xE2B53A }
+        }
+        L::Trash | L::Wrench | L::Info | L::FileText => {
+            if dark { 0xC5C6C8 } else { 0x626262 }
+        }
+        _ => return None,
+    };
+    Some(rgb(color).into())
 }
 
 fn placeholder(text: &str) -> Item {
     Item::Action { label: text.to_string().into(), icon: MenuIcon::None, hint: None, enabled: false, checked: false, run: Rc::new(|_, _| {}) }
 }
 
-fn row_content(label: SharedString, icon: MenuIcon, hint: Option<SharedString>, sub: bool, enabled: bool, tick: liquid::TickSlot, p: &Palette) -> AnyElement {
+fn row_content(
+    label: SharedString,
+    icon: MenuIcon,
+    hint: Option<SharedString>,
+    sub: bool,
+    enabled: bool,
+    tick: liquid::TickSlot,
+    p: &Palette,
+    explorer_context: bool,
+    original_icons: bool,
+) -> AnyElement {
     let icon_el: AnyElement = match icon {
         MenuIcon::None => div().into_any_element(),
-        MenuIcon::Lucide(l) => Icon::new(l).size(px(16.)).into_any_element(),
-        MenuIcon::Tinted(l, c) => Icon::new(l).size(px(16.)).text_color(c).into_any_element(),
-        MenuIcon::Image(img) => gpui_kit::img(img).size(px(16.)).into_any_element(),
+        MenuIcon::Lucide(l) => {
+            let tint = (!original_icons && explorer_context).then(|| explorer_icon_color(l, p.dark)).flatten();
+            lucide_menu_icon(l, explorer_context, original_icons, tint)
+        }
+        MenuIcon::Tinted(l, c) => lucide_menu_icon(l, explorer_context, original_icons, Some(c)),
+        MenuIcon::Image(img) => div()
+            .when(!enabled, |d| d.opacity(0.45))
+            .child(gpui_kit::img(img).size(px(16.)))
+            .into_any_element(),
         MenuIcon::Dot(c) => div().size(px(10.)).rounded_full().bg(c).into_any_element(),
     };
     h_flex()
@@ -907,6 +1064,25 @@ fn row_content(label: SharedString, icon: MenuIcon, hint: Option<SharedString>, 
         .children(hint.map(|h| div().flex_shrink_0().text_xs().text_color(p.text_secondary).child(h)))
         .when(sub, |d| d.child(Icon::new(L::ChevronRight).size(px(12.)).text_color(p.text_secondary)))
         .into_any_element()
+}
+
+fn lucide_menu_icon(icon: L, explorer_context: bool, original_icons: bool, tint: Option<Hsla>) -> AnyElement {
+    #[cfg(target_os = "windows")]
+    if explorer_context && !original_icons {
+        if let Some(glyph) = crate::icons::windows_theme_icon_glyph(icon) {
+            return crate::icons::windows_theme_glyph(glyph, px(16.));
+        }
+    }
+
+    if original_icons {
+        return Icon::new(icon).size(px(16.)).into_any_element();
+    }
+
+    let icon = Icon::new(icon).size(px(16.));
+    match tint {
+        Some(color) => icon.text_color(color).into_any_element(),
+        None => icon.into_any_element(),
+    }
 }
 
 impl MenuView {
@@ -940,7 +1116,9 @@ impl MenuView {
                     let parent = &levels[lv - 1];
                     let ix = self.open[lv - 1];
                     let parent_quick = lv == 1 && !self.quick.is_empty();
-                    let row_y = py0 + m.pad_y + if parent_quick { QUICK_H } else { 0. } + parent[..ix].iter().map(|i| i.height(&m)).sum::<f32>();
+                    // (a parent that scrolls: where the row is now; the offset is 0 or below)
+                    let scrolled = f32::from(self.scroll_of(lv - 1).offset().y);
+                    let row_y = py0 + m.pad_y + if parent_quick { QUICK_H } else { 0. } + parent[..ix].iter().map(|i| i.height(&m)).sum::<f32>() + scrolled;
                     let mut x = px0 + W - 2.;
                     if x + W > right - EDGE {
                         x = px0 - W + 2.;
@@ -950,12 +1128,24 @@ impl MenuView {
                     if y + h > bottom - EDGE {
                         y = (bottom - EDGE - h).max(ay + EDGE);
                     }
+                    // (its row scrolled up past the screen's top: the submenu stays on the screen; above it, its window was given
+                    // a place on no display and came up as large as the screen, issue 205)
+                    y = y.max(ay + EDGE);
                     (x, y)
                 }
             };
             out.push(Bounds::new(point(px(x), px(y)), size(px(W), px(h))));
         }
         out
+    }
+
+    /// The scroll of level `lv`'s list (made on first use).
+    fn scroll_of(&self, lv: usize) -> ScrollHandle {
+        let mut v = self.scrolls.borrow_mut();
+        while v.len() <= lv {
+            v.push(ScrollHandle::new());
+        }
+        v[lv].clone()
     }
 
     /// Content of one level (quick row + rows), scrolling when taller than `max_h`.
@@ -965,7 +1155,9 @@ impl MenuView {
         let full = level_height(items, quick, &m);
         let scroll = max_h.is_some_and(|mh| full > mh + 0.5);
         let list_max = max_h.unwrap_or(full) - 2. * m.pad_y - if quick { QUICK_H } else { 0. };
-        let mut list = v_flex().id(("menu-list", lv)).relative().when(scroll, |d| d.max_h(px(list_max)).overflow_y_scroll());
+        let handle = self.scroll_of(lv);
+        let mut list =
+            v_flex().id(("menu-list", lv)).relative().when(scroll, |d| d.max_h(px(list_max)).overflow_y_scroll().track_scroll(&handle));
         // the leading tick column: only in the liquid look, only when some row of this level is ticked
         let column = liquid::has_tick_column(self.liquid, items.iter().any(|i| matches!(i, Item::Action { checked: true, .. })));
         if self.liquid {
@@ -977,12 +1169,22 @@ impl MenuView {
         for (ix, item) in items.iter().enumerate() {
             list = list.child(self.render_row(lv, ix, item, column, p, cx));
         }
+        // a level taller than the screen scrolls, and shows that it does (issue 175: "the context menu often gets cut off")
+        let body: AnyElement = if scroll {
+            div()
+                .relative()
+                .child(list)
+                .child(Scrollbar::vertical(&handle).id(("menu-scrollbar", lv)).mode(ScrollbarMode::Always))
+                .into_any_element()
+        } else {
+            list.into_any_element()
+        };
         v_flex()
             .w_full()
             .px(px(m.pad_x))
             .py(px(m.pad_y))
             .when(quick, |d| d.child(self.render_quick(p, cx)))
-            .child(list)
+            .child(body)
             .into_any_element()
     }
 }

@@ -191,6 +191,34 @@ impl LookWindow {
             window.focus(&focus, cx);
         }
         let hwnd = hwnd_of(window);
+        // Opened without the keyboard ("focus on open" off), the window is never active, so it never stops being active either and
+        // "close when another window is activated" did nothing (issue 235). Until it has been in front once, the window that was in
+        // front when it opened (the file manager) is watched instead: another one coming forward closes it.
+        if !cx.global::<LookSettings>().look_focus_on_open {
+            let opener = rf_win::window::foreground();
+            cx.spawn_in(window, async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                    let front = rf_win::window::foreground();
+                    if front == hwnd {
+                        // in front once: the activation observer above takes over
+                        return;
+                    }
+                    let gone = front != 0 && front != opener;
+                    let close = this
+                        .update(cx, |this, cx| gone && !this.pinned && cx.global::<LookSettings>().look_close_on_lost_focus)
+                        .unwrap_or(false);
+                    if this.upgrade().is_none() {
+                        return;
+                    }
+                    if close {
+                        let _ = cx.update(|window, _| window.remove_window());
+                        return;
+                    }
+                }
+            })
+            .detach();
+        }
         let title = file_title(&path);
         let mut v = Self {
             path,
@@ -449,7 +477,8 @@ impl LookWindow {
             .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
     }
 
-    fn render_bar(&mut self, p: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
+    /// `width`: the window's width (logical px), which the bar's own content must stay within.
+    fn render_bar(&mut self, p: &Palette, width: f32, cx: &mut Context<Self>) -> impl IntoElement {
         let show_reload = cx.global::<LookSettings>().look_show_reload;
         let run_tip: SharedString = if self.is_executable() { t!("Çalıştır").into() } else { t!("Aç").into() };
         let overlay = self.overlay_titlebar;
@@ -496,16 +525,23 @@ impl LookWindow {
                     .gap_2()
                     .items_center()
                     .justify_between()
+                    // a long name gives way: it is cut with "…", and the buttons and the window's own controls keep their place. The
+                    // toolkit's bar row does not shrink below what is in it, so this row is held to the room left of the controls (the
+                    // bar's 12 px of padding and three 34 px controls)
+                    .max_w(px((width - 12.0 - 3.0 * 34.0 - 4.0).max(120.0)))
+                    .overflow_hidden()
                     .child(
                         h_flex()
+                            .flex_1()
                             .min_w_0()
+                            .overflow_hidden()
                             .gap_2()
                             .items_center()
                             .text_xs()
-                            .when(self.busy, |d| d.child(Icon::new(L::LoaderCircle).size(px(14.))))
-                            .child(div().min_w_0().truncate().child(self.title.clone())),
+                            .when(self.busy, |d| d.child(Icon::new(L::LoaderCircle).size(px(14.)).flex_shrink_0()))
+                            .child(div().flex_1().min_w_0().truncate().child(self.title.clone())),
                     )
-                    .child(buttons),
+                    .child(buttons.flex_shrink_0()),
             )
     }
 
@@ -604,7 +640,8 @@ impl Render for LookWindow {
         } else {
             content
         };
-        let bar = show_bar.then(|| self.render_bar(&p, cx).into_any_element());
+        let width = f32::from(window.viewport_size().width);
+        let bar = show_bar.then(|| self.render_bar(&p, width, cx).into_any_element());
         let more = self.more_open.then(|| self.render_more(&p, cx).into_any_element());
         div()
             .id("look-root")

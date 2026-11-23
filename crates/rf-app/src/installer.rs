@@ -56,6 +56,11 @@ fn after_install_or_update() {
         let _ = rf_win::dialogs::set_start_with_windows_as("DirectLook", &me.with_file_name("directlook.exe"), &["--background"], true);
     }
     let _ = crate::dialog_registration(crate::DialogReg::Follow);
+    // the icon the user chose for rustyfiles' shortcuts (the update wrote them with the default)
+    if let Some(icon) = crate::settings::Settings::load().app_icon {
+        rf_win::shell::ensure_com();
+        rf_win::app_icon::apply(Some(&icon));
+    }
 }
 
 /// A fresh install turns on rustyfiles' Open/Save dialogs (per user, no admin rights; Settings →
@@ -541,7 +546,7 @@ mod start_apply_tests {
         for open in [None, Some(r"C:\Users\x\Documents"), Some("D:\\"), Some("report.pdf"), Some("--settings=dock"), Some("--settings=speed")] {
             assert!(applies_update_at_start(open), "{open:?}");
         }
-        for side in ["--pick", "--dock", "--shell", "--quick-search", "--no-window", "--update-splash", "--bar-preview", "--shell-probe", "--veloapp-updated", "--veloapp-obsolete"] {
+        for side in ["--pick", "--dock", "--shell", "--quick-search", "--no-window", "--update-splash", "--bar-preview", "--shell-probe", "--veloapp-updated", "--veloapp-obsolete", "--open-with-folder"] {
             assert!(!applies_update_at_start(Some(side)), "{side}");
         }
     }

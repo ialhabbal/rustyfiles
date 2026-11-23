@@ -24,6 +24,9 @@ final class CommandBarView: FlippedView {
     let terminal = IconButton(icon: "square-terminal", size: NSSize(width: 36, height: 32), tooltip: String(localized: "Open in Terminal"))
     let hiddenItems = IconButton(icon: "eye", size: NSSize(width: 36, height: 32), tooltip: String(localized: "Show or hide hidden items"))
     let refresh = IconButton(icon: "rotate-cw", size: NSSize(width: 36, height: 32), tooltip: String(localized: "Refresh"))
+    /// Folds every group or opens them all; only while the folder is shown in groups.
+    let groups = IconButton(icon: "chevrons-down-up", size: NSSize(width: 36, height: 32), tooltip: String(localized: "Collapse all groups"))
+    var showsGroups = false { didSet { if showsGroups != oldValue { needsLayout = true } } }
     private let sepLeft = Divider()
     private let sepRight = Divider()
 
@@ -33,7 +36,7 @@ final class CommandBarView: FlippedView {
         new.chevron = true
         sort.chevron = true
         view.chevron = true
-        [new, sepLeft, newFolder, cut, copy, paste, rename, share, delete, properties, terminal, hiddenItems, refresh, filter, sort, view, sepRight, preview]
+        [new, sepLeft, newFolder, cut, copy, paste, rename, share, delete, properties, terminal, hiddenItems, refresh, groups, filter, sort, view, sepRight, preview]
             .forEach(addSubview)
     }
 
@@ -64,22 +67,8 @@ final class CommandBarView: FlippedView {
         }
         subviews.forEach { $0.isHidden = true }
         typealias T = AppSettings.ToolbarButton
-        // px_2, gap_0p5; separators 1×20 with mx_1
-        var x: CGFloat = 8
-        if shows(.new) {
-            place(new, x, new.intrinsicContentSize.width)
-            x += new.frame.width + 2 + 4
-            place(sepLeft, x, 1, 20)
-            x += 1 + 4 + 2
-        }
-        let left: [(T, IconButton)] = [
-            (.newFolder, newFolder), (.cut, cut), (.copy, copy), (.paste, paste), (.rename, rename), (.share, share), (.delete, delete),
-            (.properties, properties), (.terminal, terminal), (.hidden, hiddenItems), (.refresh, refresh),
-        ]
-        for (k, b) in left where shows(k) {
-            place(b, x, 36)
-            x += 36 + 2
-        }
+        // px_2, gap_0p5; separators 1×20 with mx_1. The right group first: the left one
+        // gives up its last buttons where the bar is too narrow for both (a dual pane).
         var r = bounds.width - 8
         if shows(.preview) {
             r -= 36
@@ -98,6 +87,26 @@ final class CommandBarView: FlippedView {
             r -= 36
             place(filter, r, 36)
         }
+        if showsGroups {
+            r -= 36 + 2
+            place(groups, r, 36)
+        }
+        var x: CGFloat = 8
+        if shows(.new) {
+            place(new, x, new.intrinsicContentSize.width)
+            x += new.frame.width + 2 + 4
+            place(sepLeft, x, 1, 20)
+            x += 1 + 4 + 2
+        }
+        let left: [(T, IconButton)] = [
+            (.newFolder, newFolder), (.cut, cut), (.copy, copy), (.paste, paste), (.rename, rename), (.share, share), (.delete, delete),
+            (.properties, properties), (.terminal, terminal), (.hidden, hiddenItems), (.refresh, refresh),
+        ]
+        for (k, b) in left where shows(k) {
+            guard x + 36 <= r - 8 else { break }
+            place(b, x, 36)
+            x += 36 + 2
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -114,9 +123,17 @@ final class CommandBarView: FlippedView {
 /// settings.rs): Name (flex) · Date modified 150 · Type 150 · Size 100, right-aligned.
 enum ListColumn: String, CaseIterable {
     case name, modified, created, type, size, tags, git
+    /// Where each item is: only in listings gathered from many folders (a search, a tag).
+    case folder
+    /// More columns (Windows' "More columns…", prop_chooser.rs): the file's own properties,
+    /// read from Spotlight.
+    case dimensions, duration, artist, album, title, camera
 
     /// The columns that can be turned on or off (Settings › Layout › Details columns).
-    static let optional: [ListColumn] = [.modified, .created, .type, .size, .tags, .git]
+    static let optional: [ListColumn] = [.modified, .created, .type, .size, .tags, .git, .dimensions, .duration, .artist, .album, .title, .camera]
+
+    /// The Spotlight properties.
+    var isProperty: Bool { [.dimensions, .duration, .artist, .album, .title, .camera].contains(self) }
 
     var title: String {
         switch self {
@@ -127,6 +144,13 @@ enum ListColumn: String, CaseIterable {
         case .created: String(localized: "Date created")
         case .tags: String(localized: "Tags")
         case .git: String(localized: "Git status")
+        case .folder: String(localized: "Folder")
+        case .dimensions: String(localized: "Dimensions")
+        case .duration: String(localized: "Length")
+        case .artist: String(localized: "Artist")
+        case .album: String(localized: "Album")
+        case .title: String(localized: "Title")
+        case .camera: String(localized: "Camera")
         }
     }
 
@@ -137,15 +161,19 @@ enum ListColumn: String, CaseIterable {
         case .size: 100
         case .tags: 120
         case .git: 100
+        case .folder: 240
+        case .dimensions: 110
+        case .duration: 80
+        case .artist, .album, .title, .camera: 140
         }
     }
 
-    /// Tags and Git status are shown, not sorted by.
-    var sortable: Bool { self != .tags && self != .git }
+    /// Tags, Git status and the properties are shown, not sorted by.
+    var sortable: Bool { self != .tags && self != .git && self != .folder && !isProperty }
 
     var sort: SortColumn {
         switch self {
-        case .name, .tags, .git: .name
+        case .name, .tags, .git, .folder, .dimensions, .duration, .artist, .album, .title, .camera: .name
         case .modified: .modified
         case .created: .created
         case .type: .kind
@@ -241,6 +269,21 @@ final class ListHeaderView: HoverView {
         NSRect(x: 0, y: bounds.height - 1, width: bounds.width, height: 1).fill()
     }
 
+    /// A right click on the header: the columns to show, ticked (Windows' header menu with
+    /// "More columns…": the file properties are in it too).
+    override func menu(for event: NSEvent) -> NSMenu? {
+        let b = MenuBuilder()
+        for c in ListColumn.optional where !c.isProperty {
+            b.add(c.title, checked: AppSettings.showsColumn(c)) { AppSettings.setShowsColumn(c, !AppSettings.showsColumn(c)) }
+        }
+        b.sub(String(localized: "More columns"), "columns-3") { m in
+            for c in ListColumn.optional where c.isProperty {
+                m.add(c.title, checked: AppSettings.showsColumn(c)) { AppSettings.setShowsColumn(c, !AppSettings.showsColumn(c)) }
+            }
+        }
+        return b.done()
+    }
+
     override func mouseDown(with event: NSEvent) {
         let pt = convert(event.locationInWindow, from: nil)
         if let i = handle(at: pt), let table {
@@ -274,7 +317,20 @@ final class ListHeaderView: HoverView {
 /// selection fill with the 3 px accent pill; the cursor row of a multiple selection also gets
 /// a 1 px `selection_border`. A row that is the only selection stands on the list's glass
 /// lens instead and draws no fill of its own.
-final class FileRowView: NSTableRowView {
+final class FileRowView: NSTableRowView, NSViewToolTipOwner {
+    /// Settings › Files › Show details on hover: the text, asked for only when the tip shows.
+    var detailTip: (() -> String?)? { didSet { needsLayout = true } }
+
+    override func layout() {
+        super.layout()
+        removeAllToolTips()
+        if detailTip != nil { addToolTip(bounds, owner: self, userData: nil) }
+    }
+
+    nonisolated func view(_ view: NSView, stringForToolTip tag: NSView.ToolTipTag, point: NSPoint, userData data: UnsafeMutableRawPointer?) -> String {
+        MainActor.assumeIsolated { detailTip?() ?? "" }
+    }
+
     var geometry = ListGeometry()
     var onLens = false { didSet { if onLens != oldValue { needsDisplay = true } } }
     var hovered = false { didSet { if hovered != oldValue { needsDisplay = true } } }
@@ -282,6 +338,9 @@ final class FileRowView: NSTableRowView {
     /// The first row of a group (Settings › Layout › Group by) carries the group's header
     /// above itself, in its top `GroupMetrics.header` points.
     var groupTitle: String? { didSet { needsDisplay = true } }
+    var groupCount: Int?
+    /// The group is folded: the row is its header alone.
+    var groupFolded = false
 
     override func drawBackground(in dirtyRect: NSRect) {}
     override func drawSelection(in dirtyRect: NSRect) {}
@@ -292,11 +351,9 @@ final class FileRowView: NSTableRowView {
         let inset = groupTitle == nil ? 0 : GroupMetrics.header
         if let groupTitle {
             let r = NSRect(x: 12, y: 10, width: bounds.width - 24 - geometry.gutter, height: 18)
-            let w = Draw.textWidth(groupTitle, font: Metrics.textSmMedium)
-            Draw.text(groupTitle, in: r, font: Metrics.textSmMedium, color: p.accent)
-            p.divider.setFill()
-            NSRect(x: r.minX + w + 10, y: r.midY, width: max(r.width - w - 10, 0), height: 1).fill()
+            GroupMetrics.draw(groupTitle, count: groupCount, folded: groupFolded, hot: false, in: r, palette: p)
         }
+        if groupFolded { return }
         let box = NSRect(x: 6, y: bounds.minY + inset, width: bounds.width - 6 - (6 + geometry.gutter), height: bounds.height - inset)
         if isSelected && onLens { return }
         if isSelected {
@@ -307,7 +364,8 @@ final class FileRowView: NSTableRowView {
                 path.lineWidth = 1
                 path.stroke()
             }
-            Draw.selectionPill(in: box, accent: p.accent)
+            // a group's header row starts a new block: its pill does not join the row above
+            Draw.selectionPill(in: box, accent: p.accent, above: isPreviousRowSelected && groupTitle == nil, below: isNextRowSelected)
         } else if hovered {
             Draw.roundedRect(box, radius: Metrics.radiusSmall, fill: p.hover)
         }
@@ -430,11 +488,28 @@ final class TextCellView: HoverView {
 @MainActor
 final class FileTableView: NSTableView, NSServicesMenuRequestor {
     weak var list: FileListController?
+
+    override func magnify(with event: NSEvent) { list?.pinched(event) }
+    override func scrollWheel(with event: NSEvent) {
+        if list?.commandScrolled(event) != true { super.scrollWheel(with: event) }
+    }
     private(set) var hoveredRow = -1
 
     override func keyDown(with event: NSEvent) {
         if list?.handleKey(event) == true { return }
         super.keyDown(with: event)
+    }
+
+    /// The keyboard came to the list with Tab (issue 38): the selected item is brought into
+    /// view; with nothing selected the first one is selected, so the move can be seen.
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok { list?.onFocus?() }
+        if ok, NSApp.currentEvent?.type == .keyDown, numberOfRows > 0 {
+            if selectedRow < 0 { selectRowIndexes([0], byExtendingSelection: false) }
+            scrollRowToVisible(selectedRow)
+        }
+        return ok
     }
 
     override func updateTrackingAreas() {
@@ -461,9 +536,8 @@ final class FileTableView: NSTableView, NSServicesMenuRequestor {
         guard AppSettings.selectOnHover, r >= 0 else { return }
         hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.hoveredRow == r, NSEvent.pressedMouseButtons == 0, !self.selectedRowIndexes.contains(r) else { return }
-                let extend = NSEvent.modifierFlags.contains(.command)
-                self.selectRowIndexes([r], byExtendingSelection: extend)
+                guard let self, self.hoveredRow == r, NSEvent.pressedMouseButtons == 0 else { return }
+                self.list?.hoverSelect(r)
             }
         }
     }
@@ -473,6 +547,13 @@ final class FileTableView: NSTableView, NSServicesMenuRequestor {
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         let r = row(at: p)
+        // a click on a group's header folds or opens the group
+        if r >= 0, let rv = rowView(atRow: r, makeIfNecessary: false) as? FileRowView, let title = rv.groupTitle,
+            p.y - rect(ofRow: r).minY < GroupMetrics.header
+        {
+            list?.toggleGroup(title)
+            return
+        }
         if AppSettings.selectionBoxes, r >= 0, let cell = view(atColumn: 0, row: r, makeIfNecessary: false) as? NameCellView,
             cell.boxRect.contains(cell.convert(event.locationInWindow, from: nil))
         {
@@ -527,6 +608,21 @@ final class StatusBarView: FlippedView {
     var progress = "" { didSet { needsDisplay = true } }
     var progressFraction: Double? { didSet { needsDisplay = true } }
     var performance = "" { didSet { needsDisplay = true } }
+    /// A downloaded update: "Restart to update" at the right, as on Windows.
+    var update: String? { didSet { if update != oldValue { needsDisplay = true } } }
+    var onUpdate: (() -> Void)?
+    private var updateRect: NSRect = .zero
+
+    /// The folder's Git branch, ahead / behind (git_ui.rs): a button at the right.
+    var git: GitRepo.Info? { didSet { if git != oldValue { needsDisplay = true } } }
+    var onGit: ((GitRepo.Info, NSView, NSRect) -> Void)?
+    private var gitRect: NSRect = .zero
+
+    override func mouseUp(with event: NSEvent) {
+        let pt = convert(event.locationInWindow, from: nil)
+        if let git, gitRect.contains(pt) { onGit?(git, self, gitRect) }
+        if update != nil, updateRect.contains(pt) { onUpdate?() }
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         let p = Palette.of(self)
@@ -534,6 +630,30 @@ final class StatusBarView: FlippedView {
         NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
         // px_3, gap_3, text_xs
         var r = NSRect(x: 12, y: 1, width: bounds.width - 24, height: bounds.height - 1)
+        gitRect = .zero
+        updateRect = .zero
+        if let update {
+            let text = String(localized: "Restart to update to \(update)")
+            let tw = min(Draw.textWidth(text, font: Metrics.textXs), 260)
+            let w = 16 + 6 + tw + 12
+            updateRect = NSRect(x: r.maxX - w, y: r.midY - 11, width: w, height: 22)
+            Draw.roundedRect(updateRect, radius: Metrics.radiusSmall, fill: p.accent.withAlphaComponent(0.18))
+            Draw.icon("download", in: NSRect(x: updateRect.minX + 6, y: updateRect.minY, width: 14, height: updateRect.height), size: 13, color: p.accent)
+            Draw.text(text, in: NSRect(x: updateRect.minX + 6 + 16, y: updateRect.minY, width: tw, height: updateRect.height), font: Metrics.textXs, color: p.text)
+            r.size.width = max(updateRect.minX - 8 - r.minX, 0)
+        }
+        if let git {
+            var text = git.branch
+            if git.ahead > 0 { text += "  ↑\(git.ahead)" }
+            if git.behind > 0 { text += "  ↓\(git.behind)" }
+            let tw = min(Draw.textWidth(text, font: Metrics.textXs), 220)
+            let w = 16 + 6 + tw + 12
+            gitRect = NSRect(x: r.maxX - w, y: r.midY - 11, width: w, height: 22)
+            Draw.roundedRect(gitRect, radius: Metrics.radiusSmall, fill: p.hover)
+            Draw.icon("git-branch", in: NSRect(x: gitRect.minX + 6, y: gitRect.minY, width: 14, height: gitRect.height), size: 13, color: p.textSecondary)
+            Draw.text(text, in: NSRect(x: gitRect.minX + 6 + 16, y: gitRect.minY, width: tw, height: gitRect.height), font: Metrics.textXs, color: p.text)
+            r.size.width = max(gitRect.minX - 12 - r.minX, 0)
+        }
         let right = [progress, performance].filter { !$0.isEmpty }.joined(separator: "   ")
         if !right.isEmpty {
             let rw = min(Draw.textWidth(right, font: Metrics.textXs), r.width * 0.6)
@@ -565,6 +685,8 @@ final class StatusBarView: FlippedView {
 @MainActor
 final class CardView: FlippedView {
     var onLayout: (() -> Void)?
+    /// Dual pane: this card's pane has the keyboard.
+    var isActivePane = false { didSet { if isActivePane != oldValue { needsDisplay = true } } }
 
     override var wantsUpdateLayer: Bool { true }
 
@@ -574,6 +696,14 @@ final class CardView: FlippedView {
         layer?.cornerRadius = Metrics.radius
         layer?.borderWidth = 1
         layer?.masksToBounds = true
+        applyCompact()
+    }
+
+    /// Compact window: only the corner facing the sidebar and the bars stays round.
+    func applyCompact() {
+        layer?.maskedCorners = Metrics.compact
+            ? (isFlipped && layer?.isGeometryFlipped == true ? [.layerMinXMinYCorner] : [.layerMinXMaxYCorner])
+            : [.layerMinXMinYCorner, .layerMaxXMinYCorner, .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
     }
 
     @available(*, unavailable)
@@ -584,7 +714,8 @@ final class CardView: FlippedView {
         // Appearance › Background colour: the list's own colour, at the theme's strength
         let own = Palette.parse(AppSettings.listBackground)
         layer?.backgroundColor = (own.map { $0.withAlphaComponent(max(p.contentBg.alphaComponent, 0.85)) } ?? p.contentBg).cgColor
-        layer?.borderColor = p.border.cgColor
+        // the pane with the keyboard, in a dual pane, has an accent edge
+        layer?.borderColor = isActivePane ? p.accent.withAlphaComponent(0.7).cgColor : p.border.cgColor
     }
 
     /// Appearance › Background picture: behind the files, filling the card, as visible as set.
@@ -620,4 +751,22 @@ final class CardView: FlippedView {
 enum GroupMetrics {
     /// The group header's height above a group's first row.
     static let header: CGFloat = 36
+
+    /// A group's header (folder_view.rs): a chevron (down when open, right when folded), the
+    /// title, how many items it has, and a divider to the end. A click folds it.
+    @MainActor
+    static func draw(_ title: String, count: Int?, folded: Bool, hot: Bool, in r: NSRect, palette p: Palette) {
+        Draw.icon(folded ? "chevron-right" : "chevron-down", in: NSRect(x: r.minX, y: r.minY, width: 12, height: r.height), size: 12, color: hot ? p.text : p.textSecondary)
+        var x = r.minX + 12 + 8
+        let w = Draw.textWidth(title, font: Metrics.textSmMedium)
+        Draw.text(title, in: NSRect(x: x, y: r.minY, width: max(r.maxX - x, 0), height: r.height), font: Metrics.textSmMedium, color: p.accent)
+        x += w + 8
+        if let count {
+            let n = "\(count)"
+            Draw.text(n, in: NSRect(x: x, y: r.minY, width: 60, height: r.height), font: Metrics.textXs, color: p.textTertiary)
+            x += Draw.textWidth(n, font: Metrics.textXs) + 10
+        }
+        p.divider.setFill()
+        NSRect(x: x, y: r.midY, width: max(r.maxX - x, 0), height: 1).fill()
+    }
 }

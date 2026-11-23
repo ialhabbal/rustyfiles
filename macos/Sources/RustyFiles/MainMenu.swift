@@ -47,6 +47,7 @@ enum MainMenu {
     private static func appMenu() -> NSMenu {
         let m = NSMenu(title: "rustyfiles")
         m.addItem(item(String(localized: "About rustyfiles"), #selector(NSApplication.orderFrontStandardAboutPanel(_:))))
+        m.addItem(item(String(localized: "Check for Updates…"), #selector(AppDelegate.checkForUpdates(_:))))
         m.addItem(.separator())
         m.addItem(item(String(localized: "Settings…"), #selector(W.openSettings(_:)), ","))
         m.addItem(.separator())
@@ -84,12 +85,16 @@ enum MainMenu {
         m.addItem(item(String(localized: "Copy"), #selector(W.copy(_:) as (W) -> (Any?) -> Void), "c"))
         m.addItem(item(String(localized: "Paste"), #selector(W.paste(_:)), "v"))
         m.addItem(item(String(localized: "Select All"), #selector(NSResponder.selectAll(_:)), "a"))
+        m.addItem(item(String(localized: "Duplicate"), #selector(W.duplicate(_:)), "d"))
         m.addItem(.separator())
         m.addItem(item(String(localized: "Rename"), #selector(W.rename(_:)), key(NSF2FunctionKey), []))
         m.addItem(item(String(localized: "Move to Trash"), #selector(W.moveToTrash(_:)), key(NSBackspaceCharacter), .command))
+        m.addItem(item(String(localized: "Add to Shelf"), #selector(W.addToShelf(_:)), "s", [.command, .shift]))
         m.addItem(.separator())
         m.addItem(item(String(localized: "Filter"), #selector(W.focusSearch(_:)), "f"))
         m.addItem(item(String(localized: "Go to Path"), #selector(W.focusAddress(_:)), "l"))
+        m.addItem(.separator())
+        m.addItem(item(String(localized: "Command Palette…"), #selector(W.showCommandPalette(_:)), "k"))
         return m
     }
 
@@ -97,12 +102,31 @@ enum MainMenu {
         let m = NSMenu(title: String(localized: "View"))
         m.addItem(item(String(localized: "Details"), #selector(W.showDetails(_:)), "1"))
         m.addItem(item(String(localized: "Tiles"), #selector(W.showTiles(_:)), "2"))
+        m.addItem(item(String(localized: "Cards"), #selector(W.showCards(_:)), "3"))
+        m.addItem(item(String(localized: "List"), #selector(W.showListStyle(_:)), "4"))
+        m.addItem(item(String(localized: "Columns"), #selector(W.showColumns(_:)), "5"))
+        m.addItem(item(String(localized: "Zoom In"), #selector(W.zoomIn(_:)), "+"))
+        m.addItem(item(String(localized: "Zoom Out"), #selector(W.zoomOut(_:)), "-"))
+        m.addItem(item(String(localized: "Bigger Interface"), #selector(W.interfaceBigger(_:)), "+", [.command, .option]))
+        m.addItem(item(String(localized: "Smaller Interface"), #selector(W.interfaceSmaller(_:)), "-", [.command, .option]))
+        m.addItem(item(String(localized: "Actual Size"), #selector(W.interfaceActual(_:)), "0", [.command, .option]))
+        // ⌘= as well, where + needs Shift
+        let eq = item(String(localized: "Zoom In"), #selector(W.zoomIn(_:)), "=")
+        eq.isHidden = true
+        eq.allowsKeyEquivalentWhenHidden = true
+        m.addItem(eq)
         m.addItem(.separator())
         m.addItem(item(String(localized: "Show Hidden Files"), #selector(W.toggleHidden(_:)), ".", [.command, .shift]))
         m.addItem(item(String(localized: "Refresh"), #selector(W.refresh(_:)), "r"))
+        m.addItem(item(String(localized: "Collapse / Expand All Groups"), #selector(W.toggleAllGroups(_:)), "g", [.control, .shift]))
         m.addItem(.separator())
         m.addItem(item(String(localized: "Hide Sidebar"), #selector(W.toggleSidebar(_:)), "s", [.command, .control]))
         m.addItem(item(String(localized: "Show Preview"), #selector(W.togglePreviewPane(_:)), "p", [.command, .shift]))
+        m.addItem(item(String(localized: "Show Shelf"), #selector(W.toggleShelf(_:)), "s", [.command, .option]))
+        m.addItem(item(String(localized: "Dual Pane"), #selector(W.toggleDualPane(_:)), "d", [.command, .option]))
+        m.addItem(item(String(localized: "Switch Pane"), #selector(W.switchPane(_:)), key(NSF6FunctionKey), []))
+        m.addItem(item(String(localized: "Copy to Other Pane"), #selector(W.copyToOtherPane(_:)), key(NSF5FunctionKey), .shift))
+        m.addItem(item(String(localized: "Move to Other Pane"), #selector(W.moveToOtherPane(_:)), key(NSF6FunctionKey), .shift))
         return m
     }
 
@@ -118,6 +142,10 @@ enum MainMenu {
         m.addItem(item(String(localized: "Documents"), #selector(W.goDocuments(_:)), "o", [.command, .shift]))
         m.addItem(item(String(localized: "Downloads"), #selector(W.goDownloads(_:)), "l", [.command, .option]))
         m.addItem(item(String(localized: "Applications"), #selector(W.goApplications(_:)), "a", [.command, .shift]))
+        m.addItem(.separator())
+        m.addItem(item(String(localized: "Recent Folders…"), #selector(W.showFolderHistory(_:)), "p"))
+        m.addItem(item(String(localized: "Connect to Server…"), #selector(W.connectToServer(_:)), "k", [.command, .control]))
+        m.addItem(item(String(localized: "Disk Usage"), #selector(W.showDiskUsage(_:)), "u", [.command, .option]))
         return m
     }
 
@@ -128,6 +156,7 @@ enum MainMenu {
         m.addItem(.separator())
         m.addItem(item(String(localized: "Next Tab"), #selector(W.selectNextTab(_:)), "\t", .control))
         m.addItem(item(String(localized: "Previous Tab"), #selector(W.selectPreviousTab(_:)), "\t", [.control, .shift]))
+        m.addItem(item(String(localized: "Search Tabs…"), #selector(W.searchTabs(_:)), "\\", [.command, .shift]))
         return m
     }
 }

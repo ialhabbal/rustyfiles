@@ -12437,5 +12437,848 @@
   "tr": "Özel komutlar",
   "en": "Custom commands",
   "note": "A settings row and a toolbar menu: the user's own toolbar buttons that start programs."
+ },
+ {
+  "id": "a019461a",
+  "key": "Gönder",
+  "tr": "Gönder",
+  "en": "Send to"
+ },
+ {
+  "id": "9b99d237",
+  "key": "Hazırda beklet",
+  "tr": "Hazırda beklet",
+  "en": "Hibernate"
+ },
+ {
+  "id": "429e714c",
+  "key": "Sekmelerde terminal düğmesi",
+  "tr": "Sekmelerde terminal düğmesi",
+  "en": "Terminal button on tabs"
+ },
+ {
+  "id": "647939bb",
+  "key": "Her klasör sekmesinde, o klasörde bir terminal açan düğme.",
+  "tr": "Her klasör sekmesinde, o klasörde bir terminal açan düğme.",
+  "en": "A button on each folder's tab that opens a terminal in that folder."
+ },
+ {
+  "id": "1a92eb40",
+  "key": "Masaüstünü göster şeridi",
+  "tr": "Masaüstünü göster şeridi",
+  "en": "Show desktop strip"
+ },
+ {
+  "id": "9022ecfc",
+  "key": "Sağ adanın en sağında, zilden sonra ince bir şerit: tıklayınca bütün pencereler küçülür ve masaüstü görünür, bir daha tıklayınca geri gelir.",
+  "tr": "Sağ adanın en sağında, zilden sonra ince bir şerit: tıklayınca bütün pencereler küçülür ve masaüstü görünür, bir daha tıklayınca geri gelir.",
+  "en": "A thin strip at the right end of the right island, after the bell: a click minimizes every window and shows the desktop, the next click brings them back."
+ },
+ {
+  "id": "6f0f5329",
+  "key": "Masaüstünü göster",
+  "tr": "Masaüstünü göster",
+  "en": "Show desktop"
+ },
+ {
+  "id": "b6aea286",
+  "key": "Önizlemede dosya bilgileri",
+  "tr": "Önizlemede dosya bilgileri",
+  "en": "File details in the preview"
+ },
+ {
+  "id": "475cf8e1",
+  "key": "Önizlemenin altında türü, boyutu, tarihleri ve konumu gösterir",
+  "tr": "Önizlemenin altında türü, boyutu, tarihleri ve konumu gösterir",
+  "en": "Shows the type, size, dates and location under the preview"
+ },
+ {
+  "id": "0425f790",
+  "key": "Bu konumu gizle",
+  "tr": "Bu konumu gizle",
+  "en": "Hide this place"
+ },
+ {
+  "id": "45a79fa6",
+  "key": "Gizlenen bulut ve Linux konumları",
+  "tr": "Gizlenen bulut ve Linux konumları",
+  "en": "Hidden cloud and Linux places"
+ },
+ {
+  "id": "8834e343",
+  "key": "Kenar çubuğunda tek tek gizlediğiniz konumlar. Birine tıklayınca yeniden görünür.",
+  "tr": "Kenar çubuğunda tek tek gizlediğiniz konumlar. Birine tıklayınca yeniden görünür.",
+  "en": "The places you hid from the sidebar one by one. Click one to show it again."
+ },
+ {
+  "id": "9c85c4e6",
+  "key": "Sekmelerde ara",
+  "tr": "Sekmelerde ara",
+  "en": "Search tabs"
+ },
+ {
+  "id": "d61501a6",
+  "key": "Sekmelerde ara…",
+  "tr": "Sekmelerde ara…",
+  "en": "Search tabs…"
+ },
+ {
+  "id": "ee0eb92e",
+  "key": "Kapatıldı",
+  "tr": "Kapatıldı",
+  "en": "Closed"
+ },
+ {
+  "id": "38d8fe5e",
+  "key": "Eşleşen sekme yok",
+  "tr": "Eşleşen sekme yok",
+  "en": "No matching tab"
+ },
+ {
+  "id": "9ed0e8eb",
+  "key": "Tepsi iki satırda",
+  "tr": "Tepsi iki satırda",
+  "en": "Tray in two rows"
+ },
+ {
+  "id": "03429b74",
+  "key": "Sağ adadaki tepsi simgeleri olağan boylarında, iki satır halinde dizilir; aynı genişliğe iki kat simge sığar.",
+  "tr": "Sağ adadaki tepsi simgeleri olağan boylarında, iki satır halinde dizilir; aynı genişliğe iki kat simge sığar.",
+  "en": "The tray icons in the right island keep their usual size and stand in two rows: twice as many fit the same width."
+ },
+ {
+  "id": "f19b9d2a",
+  "key": "İkonların altında adlar",
+  "tr": "İkonların altında adlar",
+  "en": "Names under the icons"
+ },
+ {
+  "id": "985e4d39",
+  "key": "Ortadaki adada her uygulamanın adı ikonunun altında yazar.",
+  "tr": "Ortadaki adada her uygulamanın adı ikonunun altında yazar.",
+  "en": "The middle island shows each app's name under its icon."
+ },
+ {
+  "id": "f65a0ac5",
+  "key": "Çalışmayan sabit uygulamalar solda",
+  "tr": "Çalışmayan sabit uygulamalar solda",
+  "en": "Pinned apps that aren't running on the left"
+ },
+ {
+  "id": "1c0163bd",
+  "key": "Sabitlenmiş ama açık olmayan uygulamalar sol adada başlatıcı olarak durur; ortadaki adada yalnızca çalışan uygulamalar olur.",
+  "tr": "Sabitlenmiş ama açık olmayan uygulamalar sol adada başlatıcı olarak durur; ortadaki adada yalnızca çalışan uygulamalar olur.",
+  "en": "Pinned apps that aren't open stand in the left island as launchers; the middle island holds only the running apps."
+ },
+ {
+  "id": "33a923e6",
+  "key": "Yazı boyutu",
+  "tr": "Yazı boyutu",
+  "en": "Text size"
+ },
+ {
+  "id": "40d45e5e",
+  "key": "Dosya yöneticisinin pencerelerindeki yazıların boyutu",
+  "tr": "Dosya yöneticisinin pencerelerindeki yazıların boyutu",
+  "en": "The size of the text in the file manager's windows"
+ },
+ {
+  "id": "92bc0ce7",
+  "key": "Klasörden çıkar",
+  "tr": "Klasörden çıkar",
+  "en": "Take out of the folder"
+ },
+ {
+  "id": "533f3598",
+  "key": "Yalnızca menüyü aç",
+  "tr": "Yalnızca menüyü aç",
+  "en": "Only open the menu"
+ },
+ {
+  "id": "70fd9283",
+  "key": "Sıkıştır'a tıklayınca",
+  "tr": "Sıkıştır'a tıklayınca",
+  "en": "Clicking Compress"
+ },
+ {
+  "id": "05f2a11f",
+  "key": "Sağ tık menüsünde Sıkıştır'a tıklamak seçilenleri bu biçimde hemen sıkıştırır; diğer seçenekler üzerine gelince açılır",
+  "tr": "Sağ tık menüsünde Sıkıştır'a tıklamak seçilenleri bu biçimde hemen sıkıştırır; diğer seçenekler üzerine gelince açılır",
+  "en": "A click on Compress in the right-click menu compresses the selection in this format at once; the other ways open when you hover over it"
+ },
+ {
+  "id": "eb46a863",
+  "key": "Arşivler nerede açılsın",
+  "tr": "Arşivler nerede açılsın",
+  "en": "Where archives open"
+ },
+ {
+  "id": "764abb10",
+  "key": "Aynı sekmede",
+  "tr": "Aynı sekmede",
+  "en": "In the same tab"
+ },
+ {
+  "id": "504bc2be",
+  "key": "Yeni sekmede",
+  "tr": "Yeni sekmede",
+  "en": "In a new tab"
+ },
+ {
+  "id": "047f356f",
+  "key": "Yeni pencerede",
+  "tr": "Yeni pencerede",
+  "en": "In a new window"
+ },
+ {
+  "id": "dce41044",
+  "key": "{h} sa {m} dk kaldı",
+  "tr": "{h} sa {m} dk kaldı",
+  "en": "{h} h {m} min left"
+ },
+ {
+  "id": "ce195c5a",
+  "key": "Eklentiler",
+  "tr": "Eklentiler",
+  "en": "Add-ons"
+ },
+ {
+  "id": "4fc8af2d",
+  "key": "Eklentiler rustyfiles'a ayrı programlar olarak eklenir: yalnızca siz kurunca indirilir, rustyfiles'ın listesindeki parmak iziyle (SHA-256) denetlenir ve istediğiniz zaman kaldırılır.",
+  "tr": "Eklentiler rustyfiles'a ayrı programlar olarak eklenir: yalnızca siz kurunca indirilir, rustyfiles'ın listesindeki parmak iziyle (SHA-256) denetlenir ve istediğiniz zaman kaldırılır.",
+  "en": "Add-ons join rustyfiles as programs of their own: they are downloaded only when you install them, checked against the fingerprint (SHA-256) in rustyfiles' list, and can be removed at any time."
+ },
+ {
+  "id": "fb510192",
+  "key": "Eklenti listesi okunuyor…",
+  "tr": "Eklenti listesi okunuyor…",
+  "en": "Reading the list of add-ons…"
+ },
+ {
+  "id": "b40e45bd",
+  "key": "Eklenti listesi okunamadı",
+  "tr": "Eklenti listesi okunamadı",
+  "en": "The list of add-ons could not be read"
+ },
+ {
+  "id": "30cd1f85",
+  "key": "Yeniden dene",
+  "tr": "Yeniden dene",
+  "en": "Try again"
+ },
+ {
+  "id": "89288286",
+  "key": "Kullanılabilir",
+  "tr": "Kullanılabilir",
+  "en": "Available"
+ },
+ {
+  "id": "81ee8375",
+  "key": "Şu an kurulabilecek bir eklenti yok.",
+  "tr": "Şu an kurulabilecek bir eklenti yok.",
+  "en": "There are no add-ons to install right now."
+ },
+ {
+  "id": "77c5f9fb",
+  "key": "İndirme yöneticisi: bir dosyayı birçok bağlantıyla birden indirir, duraklatılıp kaldığı yerden sürdürülür; torrent ve magnet bağlantılarını da indirir",
+  "tr": "İndirme yöneticisi: bir dosyayı birçok bağlantıyla birden indirir, duraklatılıp kaldığı yerden sürdürülür; torrent ve magnet bağlantılarını da indirir",
+  "en": "Download manager: fetches a file over many connections at once, can be paused and resumed where it stopped, and downloads torrents and magnet links too"
+ },
+ {
+  "id": "16ce2cd3",
+  "key": "Kurulu:",
+  "tr": "Kurulu:",
+  "en": "Installed:"
+ },
+ {
+  "id": "a75cba32",
+  "key": "Yeni sürüm:",
+  "tr": "Yeni sürüm:",
+  "en": "New version:"
+ },
+ {
+  "id": "b6e36abe",
+  "key": "Bu işlemci için henüz bir sürümü yok.",
+  "tr": "Bu işlemci için henüz bir sürümü yok.",
+  "en": "There is no build for this processor yet."
+ },
+ {
+  "id": "37169df2",
+  "key": "İndiriliyor",
+  "tr": "İndiriliyor",
+  "en": "Downloading"
+ },
+ {
+  "id": "c622ae00",
+  "key": "Güncelle",
+  "tr": "Güncelle",
+  "en": "Update"
+ },
+ {
+  "id": "d841e9cd",
+  "key": "Kur",
+  "tr": "Kur",
+  "en": "Install"
+ },
+ {
+  "id": "3e4c9ef3",
+  "key": "Kaldırılamadı (program açık olabilir)",
+  "tr": "Kaldırılamadı (program açık olabilir)",
+  "en": "Could not be removed (the program may be running)"
+ },
+ {
+  "id": "ec8fc977",
+  "key": "Kaynak kodu:",
+  "tr": "Kaynak kodu:",
+  "en": "Source code:"
+ },
+ {
+  "id": "f3ab2710",
+  "key": "Bağlantıdan indir…",
+  "tr": "Bağlantıdan indir…",
+  "en": "Download from a link…"
+ },
+ {
+  "id": "10aee4c4",
+  "key": "Bağlantıdan indir",
+  "tr": "Bağlantıdan indir",
+  "en": "Download from a link"
+ },
+ {
+  "id": "49a422fb",
+  "key": "Dosya bu klasöre indirilir:",
+  "tr": "Dosya bu klasöre indirilir:",
+  "en": "The file is downloaded into this folder:"
+ },
+ {
+  "id": "54a42be4",
+  "key": "İndir",
+  "tr": "İndir",
+  "en": "Download"
+ },
+ {
+  "id": "958d715b",
+  "key": "Bir http, https ya da magnet bağlantısı yazın",
+  "tr": "Bir http, https ya da magnet bağlantısı yazın",
+  "en": "Type an http, https or magnet link"
+ },
+ {
+  "id": "37b90abb",
+  "key": "HyperDownload kurulu değil: Ayarlar › Eklentiler'den kurabilirsiniz",
+  "tr": "HyperDownload kurulu değil: Ayarlar › Eklentiler'den kurabilirsiniz",
+  "en": "HyperDownload is not installed: you can install it from Settings › Add-ons"
+ },
+ {
+  "id": "d01a756c",
+  "key": "İndirilecek dosyaları seçin",
+  "tr": "İndirilecek dosyaları seçin",
+  "en": "Choose the files to download"
+ },
+ {
+  "id": "f4ed319d",
+  "key": "En az bir dosya seçin",
+  "tr": "En az bir dosya seçin",
+  "en": "Choose at least one file"
+ },
+ {
+  "id": "23360499",
+  "key": "Bağlantı bu klasöre indirilsin mi?",
+  "tr": "Bağlantı bu klasöre indirilsin mi?",
+  "en": "Download the link into this folder?"
+ },
+ {
+  "id": "dcdc4ca3",
+  "key": "HyperDownload ile indir",
+  "tr": "HyperDownload ile indir",
+  "en": "Download with HyperDownload"
+ },
+ {
+  "id": "d5cb1948",
+  "key": "tarayıcıdan",
+  "tr": "tarayıcıdan",
+  "en": "from the browser"
+ },
+ {
+  "id": "57f8453e",
+  "key": "İzle",
+  "tr": "İzle",
+  "en": "Watch"
+ },
+ {
+  "id": "6abaf1f8",
+  "key": "Çoğalt",
+  "tr": "Çoğalt",
+  "en": "Duplicate"
+ },
+ {
+  "id": "c46fe68c",
+  "key": "Sessiz",
+  "tr": "Sessiz",
+  "en": "Muted"
+ },
+ {
+  "id": "ae935c24",
+  "key": "Yapıştırılan metin",
+  "tr": "Yapıştırılan metin",
+  "en": "Pasted text"
+ },
+ {
+  "id": "43ac0b05",
+  "key": "Yapıştırılan resim",
+  "tr": "Yapıştırılan resim",
+  "en": "Pasted picture"
+ },
+ {
+  "id": "5b6b8e5c",
+  "key": "Yalnızca bir pencere Dock'un üstüne gelince gizle",
+  "tr": "Yalnızca bir pencere Dock'un üstüne gelince gizle",
+  "en": "Hide only when a window covers the dock"
+ },
+ {
+  "id": "4dde4dcd",
+  "key": "Otomatik gizleme açıkken Dock yalnızca bir pencere onun durduğu yere uzanınca saklanır; pencere küçültülünce, kapanınca ya da çekilince kendiliğinden geri gelir.",
+  "tr": "Otomatik gizleme açıkken Dock yalnızca bir pencere onun durduğu yere uzanınca saklanır; pencere küçültülünce, kapanınca ya da çekilince kendiliğinden geri gelir.",
+  "en": "With auto-hide on, the dock hides only when a window reaches where it stands, and comes back by itself when that window is minimised, closed or moved away."
+ },
+ {
+  "id": "6402501a",
+  "key": "Bağlantı ekle",
+  "tr": "Bağlantı ekle",
+  "en": "Add link"
+ },
+ {
+  "id": "e0e8fdd8",
+  "key": "Ayrı pencerede aç",
+  "tr": "Ayrı pencerede aç",
+  "en": "Open in a window"
+ },
+ {
+  "id": "ead038d0",
+  "key": "HyperDownload şu an çalışmıyor: bir indirme başlayınca kendiliğinden açılır.",
+  "tr": "HyperDownload şu an çalışmıyor: bir indirme başlayınca kendiliğinden açılır.",
+  "en": "HyperDownload isn't running: it starts by itself when a download begins."
+ },
+ {
+  "id": "11230b7f",
+  "key": "Şu an inen bir şey yok. Bir bağlantıyı herhangi bir klasöre yapıştırın ya da buradan ekleyin.",
+  "tr": "Şu an inen bir şey yok. Bir bağlantıyı herhangi bir klasöre yapıştırın ya da buradan ekleyin.",
+  "en": "Nothing is downloading. Paste a link into any folder, or add one here."
+ },
+ {
+  "id": "132745c7",
+  "key": "boş (İndirilenler)",
+  "tr": "boş (İndirilenler)",
+  "en": "free (Downloads)"
+ },
+ {
+  "id": "038087f4",
+  "key": "Listeyi temizle",
+  "tr": "Listeyi temizle",
+  "en": "Clear list"
+ },
+ {
+  "id": "769b9bde",
+  "key": "Bitenler",
+  "tr": "Bitenler",
+  "en": "Finished"
+ },
+ {
+  "id": "d28ed4a8",
+  "key": "Biten indirmeler burada, kapladıkları yerle birlikte listelenir.",
+  "tr": "Biten indirmeler burada, kapladıkları yerle birlikte listelenir.",
+  "en": "Finished downloads are listed here, with the space they take."
+ },
+ {
+  "id": "ba021f7c",
+  "key": "Dosyaların seçilmesi bekleniyor",
+  "tr": "Dosyaların seçilmesi bekleniyor",
+  "en": "Waiting for the files to be chosen"
+ },
+ {
+  "id": "d08a3be0",
+  "key": "eş",
+  "tr": "eş",
+  "en": "peers"
+ },
+ {
+  "id": "adcc1d2b",
+  "key": "bağlantı",
+  "tr": "bağlantı",
+  "en": "connections"
+ },
+ {
+  "id": "7ad0f9ea",
+  "key": "Sürdür",
+  "tr": "Sürdür",
+  "en": "Resume"
+ },
+ {
+  "id": "1d92c36a",
+  "key": "Silinmiş",
+  "tr": "Silinmiş",
+  "en": "Deleted"
+ },
+ {
+  "id": "3823cf7c",
+  "key": "Listeden kaldır",
+  "tr": "Listeden kaldır",
+  "en": "Remove from list"
+ },
+ {
+  "id": "1411699b",
+  "key": "Diğer programların simge işaretlerini göster",
+  "tr": "Diğer programların simge işaretlerini göster",
+  "en": "Show other programs' icon overlays"
+ },
+ {
+  "id": "27d8e0cb",
+  "key": "Google Drive, OneDrive, TortoiseGit gibi programların Gezgin'de simgelerin köşesine koyduğu durum işaretleri.",
+  "tr": "Google Drive, OneDrive, TortoiseGit gibi programların Gezgin'de simgelerin köşesine koyduğu durum işaretleri.",
+  "en": "The status marks programs such as Google Drive, OneDrive and TortoiseGit put in the corner of icons in Explorer."
+ },
+ {
+  "id": "5546865e",
+  "key": "WSL'e kopyalarken indirme işaretini bırakma",
+  "tr": "WSL'e kopyalarken indirme işaretini bırakma",
+  "en": "Leave no download mark when copying into WSL"
+ },
+ {
+  "id": "10ef9c03",
+  "key": "Windows, internetten inen bir dosyanın yanına WSL'de ayrı bir \"Zone.Identifier\" dosyası yazar. Açıkken kopyalama onu siler.",
+  "tr": "Windows, internetten inen bir dosyanın yanına WSL'de ayrı bir \"Zone.Identifier\" dosyası yazar. Açıkken kopyalama onu siler.",
+  "en": "In WSL, Windows writes a separate \"Zone.Identifier\" file beside a file downloaded from the internet. When on, copying deletes it."
+ },
+ {
+  "id": "31d132e2",
+  "key": "Sürücülerin doluluğunu sayıyla göster",
+  "tr": "Sürücülerin doluluğunu sayıyla göster",
+  "en": "Show drive space in numbers"
+ },
+ {
+  "id": "04339c77",
+  "key": "Her sürücünün çubuğunun altında kullanılan ve toplam alan",
+  "tr": "Her sürücünün çubuğunun altında kullanılan ve toplam alan",
+  "en": "Used and total space under each drive's bar"
+ },
+ {
+  "id": "bd479de9",
+  "key": "Windows Dosya Gezgini görünümü",
+  "tr": "Windows Dosya Gezgini görünümü",
+  "en": "Windows File Explorer look"
+ },
+ {
+  "id": "f6bca4e8",
+  "key": "Artık hep burada açılmasın:",
+  "tr": "Artık hep burada açılmasın:",
+  "en": "Stop always opening here for:"
+ },
+ {
+  "id": "a6a39e94",
+  "key": "Hep bu klasörde açılsın:",
+  "tr": "Hep bu klasörde açılsın:",
+  "en": "Always open in this folder for:"
+ },
+ {
+  "id": "6ff5ec59",
+  "key": "Aç / Kaydet penceresi hep bu klasörde açılır:",
+  "tr": "Aç / Kaydet penceresi hep bu klasörde açılır:",
+  "en": "Its Open / Save window always opens in:"
+ },
+ {
+  "id": "b79ebd26",
+  "key": "Listeyi sütun sütun doldur",
+  "tr": "Listeyi sütun sütun doldur",
+  "en": "Fill the List column by column"
+ },
+ {
+  "id": "c9f22cd9",
+  "key": "Sekmede klasörün yolu",
+  "tr": "Sekmede klasörün yolu",
+  "en": "The folder's path on tabs"
+ },
+ {
+  "id": "b47392d6",
+  "key": "Sekme, klasörün adı yerine tam yolunu küçük yazıyla gösterir; sığmayan kısım sondan kesilir.",
+  "tr": "Sekme, klasörün adı yerine tam yolunu küçük yazıyla gösterir; sığmayan kısım sondan kesilir.",
+  "en": "Tabs show the folder's whole path in smaller text instead of its name; what doesn't fit is cut at the end."
+ },
+ {
+  "id": "d9cac923",
+  "key": "Tüm grupları daralt",
+  "tr": "Tüm grupları daralt",
+  "en": "Collapse all groups"
+ },
+ {
+  "id": "c30af95d",
+  "key": "Tüm grupları genişlet",
+  "tr": "Tüm grupları genişlet",
+  "en": "Expand all groups"
+ },
+ {
+  "id": "5c26267c",
+  "key": "Tüm grupları daralt / genişlet",
+  "tr": "Tüm grupları daralt / genişlet",
+  "en": "Collapse / expand all groups"
+ },
+ {
+  "id": "438fff43",
+  "key": "Başka programların açtığı Explorer pencereleri",
+  "tr": "Başka programların açtığı Explorer pencereleri",
+  "en": "Explorer windows other programs open"
+ },
+ {
+  "id": "109ffa73",
+  "key": "Bir program (örneğin bir indirme yöneticisi) Explorer'ı kendisi açarsa pencere kapanır ve aynı yer rustyfiles'ta açılır. rustyfiles çalışırken geçerlidir.",
+  "tr": "Bir program (örneğin bir indirme yöneticisi) Explorer'ı kendisi açarsa pencere kapanır ve aynı yer rustyfiles'ta açılır. rustyfiles çalışırken geçerlidir.",
+  "en": "When a program (a download manager, for example) starts File Explorer itself, its window is closed and the same place opens in rustyfiles. Works while rustyfiles is running."
+ },
+ {
+  "id": "6fee9305",
+  "key": "Performans kipi",
+  "tr": "Performans kipi",
+  "en": "Performance mode"
+ },
+ {
+  "id": "40761adf",
+  "key": "Dock hareket etmez ve cam yerine düz zeminle çizilir: bir oyun ekran kartını meşgul ederken daha az iş yapar.",
+  "tr": "Dock hareket etmez ve cam yerine düz zeminle çizilir: bir oyun ekran kartını meşgul ederken daha az iş yapar.",
+  "en": "The Dock skips its motions and is drawn on a solid fill instead of glass: less work while a game keeps the graphics card busy."
+ },
+ {
+  "id": "6d5c4fbb",
+  "key": "Tema klasörü",
+  "tr": "Tema klasörü",
+  "en": "Theme folder"
+ },
+ {
+  "id": "4f72cd3e",
+  "key": "Ayar klasöründeki themes içinden bir klasör: theme.toml renkleri, icons klasörü simgeleri değiştirir. Biçimi GitHub'da docs/themes.md'de.",
+  "tr": "Ayar klasöründeki themes içinden bir klasör: theme.toml renkleri, icons klasörü simgeleri değiştirir. Biçimi GitHub'da docs/themes.md'de.",
+  "en": "A folder in themes, in the settings folder: its theme.toml changes the colours, its icons folder the icons. The format is in docs/themes.md on GitHub."
+ },
+ {
+  "id": "048a70ae",
+  "key": "Tema klasörlerini aç",
+  "tr": "Tema klasörlerini aç",
+  "en": "Open the themes folder"
+ },
+ {
+  "id": "10b07e23",
+  "key": "Onar",
+  "tr": "Onar",
+  "en": "Repair"
+ },
+ {
+  "id": "66b31c7b",
+  "key": "Programı kaldır",
+  "tr": "Programı kaldır",
+  "en": "Uninstall"
+ },
+ {
+  "id": "e23b7c62",
+  "key": "Sonraki masaüstü arka planı",
+  "tr": "Sonraki masaüstü arka planı",
+  "en": "Next desktop background"
+ },
+ {
+  "id": "2cedf68f",
+  "key": "Yerel (varsayılan)",
+  "tr": "Yerel (varsayılan)",
+  "en": "Native (default)"
+ },
+ {
+  "id": "b9676345",
+  "key": "Varyasyon",
+  "tr": "Varyasyon",
+  "en": "Variant"
+ },
+ {
+  "id": "0e00912e",
+  "key": "İkon teması",
+  "tr": "İkon teması",
+  "en": "Icon theme"
+ },
+ {
+  "id": "84511fe8",
+  "key": "Dosya ve klasör simgeleri. Sistem simgelerini kullanır; Freedesktop paketlerini listeden seçin ya da klasörü açın. Paketin varyasyonları varsa ayrıca seçilebilir.",
+  "tr": "Dosya ve klasör simgeleri. Sistem simgelerini kullanır; Freedesktop paketlerini listeden seçin ya da klasörü açın. Paketin varyasyonları varsa ayrıca seçilebilir.",
+  "en": "File and folder icons. Uses system icons; pick a Freedesktop pack from the list or open the pack folder. Variants appear below when the pack has them."
+ },
+ {
+  "id": "59d38c05",
+  "key": "varsayılan",
+  "tr": "varsayılan",
+  "en": "default"
+ },
+ {
+  "id": "dcfbc9e0",
+  "key": "Kompakt pencere",
+  "tr": "Kompakt pencere",
+  "en": "Compact window"
+ },
+ {
+  "id": "fbd43181",
+  "key": "Uygulama simgesi",
+  "tr": "Uygulama simgesi",
+  "en": "App icon"
+ },
+ {
+  "id": "e0eca68c",
+  "key": "Başlat menüsündeki, masaüstündeki ve görev çubuğuna sabitlenmiş rustyfiles kısayollarının simgesi. Güncellemelerden sonra da kalır.",
+  "tr": "Başlat menüsündeki, masaüstündeki ve görev çubuğuna sabitlenmiş rustyfiles kısayollarının simgesi. Güncellemelerden sonra da kalır.",
+  "en": "The icon of rustyfiles' shortcuts in the Start menu, on the desktop and pinned to the taskbar. It stays after updates."
+ },
+ {
+  "id": "ad4e6b1d",
+  "key": "Simge seçin",
+  "tr": "Simge seçin",
+  "en": "Choose an icon"
+ },
+ {
+  "id": "42d8bc18",
+  "key": "Simge dosyaları",
+  "tr": "Simge dosyaları",
+  "en": "Icon files"
+ },
+ {
+  "id": "38ffe584",
+  "key": "Sekmeler, adres çubuğu ve komut çubuğu daha ince olur, içerik pencerenin sağına ve altına kadar uzanır. Simgeler ve yazılar aynı boyda kalır.",
+  "tr": "Sekmeler, adres çubuğu ve komut çubuğu daha ince olur, içerik pencerenin sağına ve altına kadar uzanır. Simgeler ve yazılar aynı boyda kalır.",
+  "en": "The tabs, the address bar and the command bar are thinner, and the content reaches the window's right and bottom edges. Icons and text keep their size."
+ },
+ {
+  "id": "2560942b",
+  "key": "Bu öğeyi sabitlenenlerden kaldırmak istiyor musunuz?",
+  "tr": "Bu öğeyi sabitlenenlerden kaldırmak istiyor musunuz?",
+  "en": "Do you want to remove this item from the pinned section?"
+ },
+ {
+  "id": "431d7079",
+  "key": "Terminal seç",
+  "tr": "Terminal seç",
+  "en": "Choose terminal"
+ },
+ {
+  "id": "173a07d0",
+  "key": "Otomatik: Windows Terminal, yoksa PowerShell",
+  "tr": "Otomatik: Windows Terminal, yoksa PowerShell",
+  "en": "Automatic: Windows Terminal, else PowerShell"
+ },
+ {
+  "id": "6d29d44c",
+  "key": "en:Sort",
+  "tr": "Sırala",
+  "en": "Sort"
+ },
+ {
+  "id": "e070104e",
+  "key": "en:New",
+  "tr": "Yeni",
+  "en": "New"
+ },
+ {
+  "id": "a7573fc8",
+  "key": "Yeni sekmede adres çubuğuna yaz",
+  "tr": "Yeni sekmede adres çubuğuna yaz",
+  "en": "Type in the address bar of a new tab"
+ },
+ {
+  "id": "f4955e82",
+  "key": "Ctrl+T ve + düğmesi: bir yolu hemen yazabilir ya da yapıştırabilirsiniz",
+  "tr": "Ctrl+T ve + düğmesi: bir yolu hemen yazabilir ya da yapıştırabilirsiniz",
+  "en": "Ctrl+T and the + button: type or paste a path at once"
+ },
+ {
+  "id": "25ac4d3a",
+  "key": "Üzerine gelince ayrıntıları göster",
+  "tr": "Üzerine gelince ayrıntıları göster",
+  "en": "Show details on hover",
+  "note": "a setting switch: show a small box with file details when the mouse pointer rests on a file"
+ },
+ {
+  "id": "10326180",
+  "key": "İşaretçi bir öğenin üzerinde durunca boyutu, tarihleri ve resmin boyutlarını gösteren kutu",
+  "tr": "İşaretçi bir öğenin üzerinde durunca boyutu, tarihleri ve resmin boyutlarını gösteren kutu",
+  "en": "The box with the size, the dates and a picture's dimensions when the pointer rests on an item"
+ },
+ {
+  "id": "0e27a81b",
+  "key": "Sıkışık öğeler",
+  "tr": "Sıkışık öğeler",
+  "en": "Compact items",
+  "note": "a setting: a denser layout of the file list (less space between items), like Explorer's \"compact view\""
+ },
+ {
+  "id": "5e476957",
+  "key": "Explorer'ın sıkışık görünümü gibi: ayrıntılar görünümünde satırlar incelir, ızgarada öğeler birbirine ve adlar simgelerine yaklaşır. Her klasörde geçerlidir.",
+  "tr": "Explorer'ın sıkışık görünümü gibi: ayrıntılar görünümünde satırlar incelir, ızgarada öğeler birbirine ve adlar simgelerine yaklaşır. Her klasörde geçerlidir.",
+  "en": "Like Explorer's compact view: rows in Details are thinner, and in the grid the items sit closer together and names closer to their pictures. Applies to every folder."
+ },
+ {
+  "id": "3d136994",
+  "key": "İkili, IEC adlarıyla (1 KiB = 1024 bayt)",
+  "tr": "İkili, IEC adlarıyla (1 KiB = 1024 bayt)",
+  "en": "Binary, IEC names (1 KiB = 1024 bytes)"
+ },
+ {
+  "id": "37cfe016",
+  "key": "Sunucu cevap vermiyor",
+  "tr": "Sunucu cevap vermiyor",
+  "en": "The server does not answer",
+  "note": "shown in an empty folder view: the network server holding this shared folder does not respond"
+ },
+ {
+  "id": "6422f057",
+  "key": "Windows son açılan öğeleri tutmuyor. Burada görmek için Windows Ayarları › Kişiselleştirme › Başlat'ta \"Son açılan öğeleri Başlat'ta, Atlama Listelerinde ve Dosya Gezgini'nde göster\" seçeneğini açın.",
+  "tr": "Windows son açılan öğeleri tutmuyor. Burada görmek için Windows Ayarları › Kişiselleştirme › Başlat'ta \"Son açılan öğeleri Başlat'ta, Atlama Listelerinde ve Dosya Gezgini'nde göster\" seçeneğini açın.",
+  "en": "Windows keeps no list of recently opened items. To see them here, turn on \"Show recently opened items in Start, Jump Lists, and File Explorer\" in Windows Settings › Personalization › Start."
+ },
+ {
+  "id": "eb95aac1",
+  "key": "Sabit diskleri de dizinle",
+  "tr": "Sabit diskleri de dizinle",
+  "en": "Index hard drives too",
+  "note": "a setting switch: also add spinning hard disks (HDD) to the file-name search index"
+ },
+ {
+  "id": "35002534",
+  "key": "Dönen diskler (HDD) varsayılan olarak dizine alınmaz: taranmaları dakikalar sürer ve duyulur. Açılırsa tarama bilgisayar boştayken yapılır.",
+  "tr": "Dönen diskler (HDD) varsayılan olarak dizine alınmaz: taranmaları dakikalar sürer ve duyulur. Açılırsa tarama bilgisayar boştayken yapılır.",
+  "en": "Spinning hard drives (HDD) are left out by default: reading one takes minutes and can be heard. When on, the drive is read while the PC is idle."
+ },
+ {
+  "id": "fcc36417",
+  "key": "Metin düzenleyicide düzenle",
+  "tr": "Metin düzenleyicide düzenle",
+  "en": "Edit in text editor",
+  "note": "a command: open the selected files in a text editor program to change them"
+ },
+ {
+  "id": "3f183d7a",
+  "key": "Metin düzenleyicide düzenle  (F4)",
+  "tr": "Metin düzenleyicide düzenle  (F4)",
+  "en": "Edit in text editor  (F4)",
+  "note": "a toolbar button tooltip: open the selected files in a text editor; F4 is its key"
+ },
+ {
+  "id": "7596f080",
+  "key": "Metin düzenleyici (F4)",
+  "tr": "Metin düzenleyici (F4)",
+  "en": "Text editor (F4)",
+  "note": "a setting title: which text editor program the F4 command uses"
+ },
+ {
+  "id": "7f9f54f7",
+  "key": "Otomatik: Not Defteri",
+  "tr": "Otomatik: Not Defteri",
+  "en": "Automatic: Notepad",
+  "note": "a setting value: chosen automatically, Windows Notepad (keep the program name Notepad as Windows calls it in this language)"
+ },
+ {
+  "id": "8207de4b",
+  "key": "Metin düzenleyici seç",
+  "tr": "Metin düzenleyici seç",
+  "en": "Choose text editor",
+  "note": "title of a file dialog: pick the text editor program"
  }
 ]

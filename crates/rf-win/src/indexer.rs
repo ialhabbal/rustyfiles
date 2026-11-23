@@ -38,6 +38,44 @@ struct Slot {
     changed_since_save: AtomicBool,
     /// Followed through the volume's change journal (NTFS) instead of a recursive watcher.
     journaled: bool,
+    /// A disk with a seek penalty (a hard drive): every walk of it waits until the PC is idle.
+    spinning: bool,
+}
+
+/// How long nobody has touched the keyboard or mouse before a walk that can wait starts: a walk reads the whole drive (minutes and
+/// audible on a hard drive, a burst on every core on an SSD). WHY (Discord, 2026-11-23: fans at full speed for days on an older PC
+/// with hard drives, gone once rustyfiles was uninstalled).
+const IDLE_BEFORE_WALK: Duration = Duration::from_secs(60);
+
+/// Time since the last keyboard or mouse input in this session.
+fn idle_for() -> Duration {
+    use windows::Win32::System::SystemInformation::GetTickCount;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    let mut li = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+    if !unsafe { GetLastInputInfo(&mut li) }.as_bool() {
+        return Duration::MAX;
+    }
+    Duration::from_millis(unsafe { GetTickCount() }.wrapping_sub(li.dwTime) as u64)
+}
+
+/// Waits until the PC has been idle for [`IDLE_BEFORE_WALK`]; false when cancelled meanwhile.
+fn wait_until_idle(root: &Path, cancel: &AtomicBool) -> bool {
+    // (tests walk temporary folders and must not wait for the person at the keyboard)
+    if cfg!(test) {
+        return true;
+    }
+    let mut said = false;
+    while !cancel.load(Ordering::Relaxed) {
+        if idle_for() >= IDLE_BEFORE_WALK {
+            return true;
+        }
+        if !said {
+            log::info!("indexer: {}: walking once the PC is idle", root.display());
+            said = true;
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+    false
 }
 
 struct Service {
@@ -66,6 +104,7 @@ pub fn start(roots: Vec<PathBuf>, dir: PathBuf) {
     let mut watchers = Vec::new();
     for root in roots {
         let journaled = crate::usn::query(&root).is_some();
+        let spinning = crate::drives::seek_penalty(&root) == Some(true);
         let slot = Arc::new(Slot {
             file: file_for(&dir, &root),
             root,
@@ -74,6 +113,7 @@ pub fn start(roots: Vec<PathBuf>, dir: PathBuf) {
             dirty: Mutex::new(HashSet::new()),
             changed_since_save: AtomicBool::new(false),
             journaled,
+            spinning,
         });
         // NTFS: the change journal says which folders changed, once a second (cheaper than a
         // watcher on a whole drive, which a build floods with events, and it can't overflow)
@@ -167,7 +207,11 @@ fn run(slot: Arc<Slot>, cancel: Arc<AtomicBool>) {
     // 2. what changed while the app was closed: from the change journal, else a fresh walk
     let t = Instant::now();
     // (the folders are listed with no lock held: searches use the loaded index meanwhile)
-    let caught = slot.index.read().is_some().then(|| crate::nameindex::catch_up_locked(&slot.index, &cancel));
+    // (the read guard must be gone before the catch-up: it ends by taking the write lock, and a guard kept to the end of the statement
+    // made the thread wait for itself, holding every search of the drive behind the waiting writer: the C: index of a PC whose journal
+    // still had the saved position was never searched nor saved again)
+    let loaded = slot.index.read().is_some();
+    let caught = loaded.then(|| crate::nameindex::catch_up_locked(&slot.index, &cancel));
     match caught {
         Some(Ok(n)) => {
             log::info!("indexer: {} caught up from the change journal in {:.2} s, {n} folders listed again", slot.root.display(), t.elapsed().as_secs_f32());
@@ -181,6 +225,11 @@ fn run(slot: Arc<Slot>, cancel: Arc<AtomicBool>) {
             log::info!("indexer: {}: the change journal can't tell ({e:?}; saved at {saved:?}, journal now {:?}), walking", slot.root.display(), crate::usn::query(&slot.root));
         }
         None => {}
+    }
+    // a walk again (the saved index stays searchable meanwhile) or any walk of a hard drive: once the PC is idle. Only an SSD's first
+    // walk starts at once: until it is done there is nothing to search.
+    if (loaded || slot.spinning) && !wait_until_idle(&slot.root, &cancel) {
+        return;
     }
     let fresh = Index::build(&slot.root, &cancel);
     if cancel.load(Ordering::Relaxed) {
@@ -234,6 +283,10 @@ fn follow(slot: &Slot, cancel: &AtomicBool) {
     }
 }
 
+/// How long a search waits for an index that is being changed (a refresh swaps it in within milliseconds). Longer means something holds
+/// it far too long: the search then answers `None` (the disk is searched instead) rather than hang the search box with it.
+const SEARCH_WAIT: Duration = Duration::from_secs(2);
+
 /// Searches the index whose root holds `under`: `None` when no ready index covers it (search
 /// the disk then).
 pub fn search(pattern: &str, under: &Path, include_hidden: bool, max: usize) -> Option<Vec<PathBuf>> {
@@ -245,7 +298,7 @@ pub fn search(pattern: &str, under: &Path, include_hidden: bool, max: usize) -> 
     if slot.state.load(Ordering::Relaxed) != State::Ready as u8 {
         return None;
     }
-    let ix = slot.index.read();
+    let ix = slot.index.try_read_for(SEARCH_WAIT)?;
     ix.as_ref()?.search(pattern, Some(under), include_hidden, max)
 }
 
@@ -259,7 +312,7 @@ pub fn search_ranked(pattern: &str, under: &Path, include_hidden: bool, max: usi
     if slot.state.load(Ordering::Relaxed) != State::Ready as u8 {
         return None;
     }
-    let ix = slot.index.read();
+    let ix = slot.index.try_read_for(SEARCH_WAIT)?;
     ix.as_ref()?.search_ranked(pattern, Some(under), include_hidden, max, rank)
 }
 
@@ -283,10 +336,12 @@ pub fn status() -> Vec<(PathBuf, State, usize, usize)> {
 
 /// The drives worth indexing: local, fixed, NTFS or ReFS. Cloud drives (Google Drive, a
 /// mounted share) and removable disks stay out: walking them would download files or wake disks.
-pub fn local_roots() -> Vec<PathBuf> {
+pub fn local_roots(hard_drives: bool) -> Vec<PathBuf> {
     crate::drives::list_drives()
         .into_iter()
         .filter(|d| d.kind == crate::drives::DriveKind::Fixed && matches!(d.fs.to_ascii_uppercase().as_str(), "NTFS" | "REFS"))
+        // hard drives only when asked for (Settings): walking one is minutes of seeking that can be heard; unknown counts as an SSD
+        .filter(|d| hard_drives || crate::drives::seek_penalty(&d.root) != Some(true))
         .map(|d| d.root)
         .collect()
 }
@@ -313,6 +368,10 @@ fn follow_journal(slot: &Slot, cancel: &AtomicBool) {
             Err(crate::usn::Gap::Unreadable) if unreadable < 10 => unreadable += 1,
             Err(e) => {
                 log::info!("indexer: {}: lost the change journal ({e:?}), walking again", slot.root.display());
+                // (the index we have keeps answering searches until then)
+                if !wait_until_idle(&slot.root, cancel) {
+                    return;
+                }
                 let fresh = Index::build(&slot.root, cancel);
                 if cancel.load(Ordering::Relaxed) {
                     return;
@@ -329,5 +388,62 @@ fn follow_journal(slot: &Slot, cancel: &AtomicBool) {
             save(slot);
             last_save = Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A start whose saved index can be caught up from the change journal must get through: it caught up, saved the index and went on
+    /// following the drive. (It used to wait for itself for ever.)
+    #[test]
+    fn a_start_that_catches_up_from_the_journal_saves_and_searches() {
+        let dir = std::env::temp_dir().join(format!("rf-indexer-start-{}", std::process::id()));
+        let root = dir.join("tree");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        if crate::usn::query(&root).is_none() {
+            eprintln!("no change journal on this volume, skipped");
+            return;
+        }
+        std::fs::write(root.join("sub").join("eski.txt"), b"x").unwrap();
+        let file = dir.join("tree.rfidx");
+        Index::build(&root, &AtomicBool::new(false)).save(&file).unwrap();
+        let saved_at = std::fs::metadata(&file).unwrap().modified().unwrap();
+        // a change after the save: the start catches up with it from the journal
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(root.join("sub").join("yeni.txt"), b"x").unwrap();
+        let slot = Arc::new(Slot {
+            root: root.clone(),
+            file: file.clone(),
+            index: RwLock::new(None),
+            state: AtomicU8::new(State::Building as u8),
+            dirty: Mutex::new(HashSet::new()),
+            changed_since_save: AtomicBool::new(false),
+            journaled: true,
+            spinning: false,
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let (slot, cancel) = (slot.clone(), cancel.clone());
+            std::thread::spawn(move || run(slot, cancel));
+        }
+        let start = Instant::now();
+        loop {
+            let saved = std::fs::metadata(&file).ok().and_then(|m| m.modified().ok()).is_some_and(|m| m > saved_at);
+            let found = slot
+                .index
+                .try_read_for(Duration::from_millis(100))
+                .and_then(|g| g.as_ref().and_then(|ix| ix.search("yeni", None, false, 10)))
+                .is_some_and(|hits| !hits.is_empty());
+            if saved && found {
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(20), "the start did not catch up, save and search in 20 s (saved {saved}, found {found})");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        cancel.store(true, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(1200));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

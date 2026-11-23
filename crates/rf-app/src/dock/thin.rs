@@ -453,7 +453,9 @@ fn poll(cx: &mut App) -> Option<u64> {
             continue;
         }
         // (no zone known: neither near nor away; no cursor position, as on a locked desktop: away)
-        let inside = m.zone.map(|z| pointer.is_some_and(|(x, y, _)| z.contains(x, y)));
+        // (the thin glass to become near, the whole grown dock to stay near: see `Zone`)
+        let near = m.model.inputs.near;
+        let inside = m.zone.map(|z| pointer.is_some_and(|(x, y, _)| z.holds(x, y, near)));
         // (a panel, a menu or a preview keeps the dock it belongs to grown, and no other)
         if m.model.observe(inside, button, open && active == m.mon) {
             changed.push(m.mon);
@@ -578,7 +580,7 @@ mod tests {
             match s {
                 Slot::Icon => {
                     assert!((a.0 + a.1 / 2.0 - (b.0 + b.1 / 2.0)).abs() < 1e-4, "the centre moved: {a:?} {b:?}");
-                    assert!((b.1 - 30.0).abs() < 1e-4, "an icon is 30 units thin");
+                    assert!((b.1 - rf_win::dock::thin::THIN_ICON).abs() < 1e-4, "an icon is THIN_ICON units thin");
                 }
                 Slot::Separator => assert_eq!(a, b),
             }
@@ -687,7 +689,7 @@ mod tests {
 
     #[test]
     fn the_thin_icons_are_a_part_of_the_rest_size() {
-        assert!((Squeeze::at(0.0).icon * ICON_REST - 30.0).abs() < 1e-4);
+        assert!((Squeeze::at(0.0).icon * ICON_REST - rf_win::dock::thin::THIN_ICON).abs() < 1e-4);
     }
 
     #[test]

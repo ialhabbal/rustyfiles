@@ -42,6 +42,33 @@ pub fn click_selection(shown: &[usize], selected: &HashSet<usize>, anchor: Optio
     (HashSet::from([clicked]), Some(clicked))
 }
 
+/// A drag over the rows (issue 200, "Can't click and drag to select files inside the recycle bin"): every shown row from the one the
+/// press was on (`from`) to the one the pointer is over now (`to`), both places in `shown`.
+pub fn sweep_selection(shown: &[usize], from: usize, to: usize) -> HashSet<usize> {
+    let last = shown.len().saturating_sub(1);
+    let (a, b) = (from.min(to).min(last), from.max(to).min(last));
+    shown.get(a..=b).map(|r| r.iter().copied().collect()).unwrap_or_default()
+}
+
+/// A selection box drawn from the empty space of the list (issue 200): the shown rows whose band of height `row_h` meets the box's
+/// vertical span `top..=bottom` (in the rows' own coordinates: 0 is the first row's top edge), together with `base` (what was selected
+/// before, when Ctrl or Shift was held). The rows fill the list's width, so only the vertical span decides.
+pub fn band_selection(shown: &[usize], base: &HashSet<usize>, top: f32, bottom: f32, row_h: f32) -> HashSet<usize> {
+    let mut out = base.clone();
+    if shown.is_empty() || row_h <= 0.0 || !top.is_finite() || !bottom.is_finite() {
+        return out;
+    }
+    let (top, bottom) = (top.min(bottom), top.max(bottom));
+    let end = shown.len() as f32 * row_h;
+    if bottom < 0.0 || top >= end {
+        return out;
+    }
+    let first = (top.max(0.0) / row_h).floor() as usize;
+    let last = ((bottom.min(end - 0.001)) / row_h).floor() as usize;
+    out.extend(shown[first.min(shown.len() - 1)..=last.min(shown.len() - 1)].iter().copied());
+    out
+}
+
 /// Every shown row that is not selected, for "invert selection".
 pub fn inverted(shown: &[usize], selected: &HashSet<usize>) -> HashSet<usize> {
     shown.iter().copied().filter(|r| !selected.contains(r)).collect()
@@ -51,7 +78,22 @@ pub fn inverted(shown: &[usize], selected: &HashSet<usize>) -> HashSet<usize> {
 mod selection_tests {
     use std::collections::HashSet;
 
-    use super::{click_selection, inverted};
+    use super::{band_selection, click_selection, inverted, sweep_selection};
+
+    #[test]
+    fn a_box_from_the_empty_space_selects_the_rows_it_meets() {
+        let shown = [7, 3, 9, 4];
+        let none = HashSet::new();
+        // from under the last row (y 130) up into the second row (y 40): rows 1 to 3, rows 32 high
+        assert_eq!(band_selection(&shown, &none, 130.0, 40.0, 32.0), set(&[3, 9, 4]));
+        // a box that touches only the empty space selects nothing
+        assert_eq!(band_selection(&shown, &none, 140.0, 200.0, 32.0), set(&[]));
+        // from above the first row down into it
+        assert_eq!(band_selection(&shown, &none, -10.0, 5.0, 32.0), set(&[7]));
+        // with Ctrl the rows selected before stay
+        assert_eq!(band_selection(&shown, &set(&[7]), 100.0, 127.0, 32.0), set(&[7, 4]));
+        assert_eq!(band_selection(&[], &none, 0.0, 50.0, 32.0), set(&[]));
+    }
 
     fn set(rows: &[usize]) -> HashSet<usize> {
         rows.iter().copied().collect()
@@ -59,6 +101,15 @@ mod selection_tests {
 
     /// The list shows the items in another order than they are stored (sorted, filtered): a range follows what is SHOWN.
     const SHOWN: [usize; 6] = [7, 2, 9, 4, 0, 5];
+
+    #[test]
+    fn a_drag_selects_the_shown_rows_between_its_ends_either_way() {
+        assert_eq!(sweep_selection(&SHOWN, 1, 3), set(&[2, 9, 4]));
+        assert_eq!(sweep_selection(&SHOWN, 4, 2), set(&[9, 4, 0]));
+        assert_eq!(sweep_selection(&SHOWN, 5, 5), set(&[5]));
+        assert_eq!(sweep_selection(&SHOWN, 2, 99), set(&[9, 4, 0, 5]), "past the last row: up to the last one");
+        assert!(sweep_selection(&[], 0, 3).is_empty());
+    }
 
     #[test]
     fn a_plain_click_selects_one_row_and_ctrl_adds_or_removes() {

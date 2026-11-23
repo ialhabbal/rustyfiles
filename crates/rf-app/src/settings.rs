@@ -1,6 +1,7 @@
 //! Persistent user settings (%APPDATA%\rustyfiles\settings.toml) as a GPUI global.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use gpui_kit::*;
@@ -18,6 +19,19 @@ pub enum ThemePref {
     /// Pure black for OLED screens: black surfaces, white text, no see-through material (issue 45: "A true black background
     /// (#000000). Pure white text (#FFFFFF)").
     Black,
+}
+
+/// Generic file icons: the shell's current pictures or a freedesktop pack in `icon-themes/`.
+/// Old settings have no key and stay on `Windows`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum IconThemePref {
+    #[default]
+    Windows,
+    Freedesktop,
+    /// Value written by the discarded local XP build. Kept so that settings file still loads; behaves like `Windows`.
+    #[serde(other)]
+    Legacy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -252,6 +266,33 @@ pub enum IdePref {
 }
 
 /// Which of our own entries the context menu shows (Settings → General → Context menu).
+/// Where an archive opens when it is opened like a folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ArchiveOpen {
+    /// In the same tab, as a folder does.
+    #[default]
+    Here,
+    NewTab,
+    NewWindow,
+}
+
+/// The format a click on "Sıkıştır" compresses in (Discord, 2026-11-20: "a default zipping method setting in settings").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickCompress {
+    /// A click only opens the submenu, as before.
+    Menu,
+    #[default]
+    Zip,
+    SevenZ,
+    TarZst,
+    TarGz,
+    Tar,
+    /// WinRAR's format, through its Rar.exe (only when WinRAR is installed).
+    Rar,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MenuPrefs {
@@ -264,6 +305,8 @@ pub struct MenuPrefs {
     pub tags: bool,
     pub shelf: bool,
     pub terminal: bool,
+    /// Explorer's "Send to" (the SendTo folder's entries and the drives) in the first menu. Issue 117.
+    pub send_to: bool,
     /// Shell extensions under "Show more options" (off = listed at the bottom of the menu).
     pub shell_submenu: bool,
 }
@@ -280,6 +323,7 @@ impl Default for MenuPrefs {
             tags: true,
             shelf: true,
             terminal: true,
+            send_to: true,
             shell_submenu: true,
         }
     }
@@ -313,6 +357,23 @@ pub struct ColumnPrefs {
     /// then nothing of the property columns runs and the file has no such key.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub properties: Vec<String>,
+    /// The Name column's width once a divider was dragged (issue 135: dividers work as in Explorer, the columns stand from the left
+    /// and the room left over is at the right end). 0: the Name column takes whatever the others leave, as before any drag.
+    #[serde(skip_serializing_if = "is_zero_u16")]
+    pub name_width: u16,
+}
+
+fn is_hundred(v: &u16) -> bool {
+    *v == 100
+}
+
+/// The base size (rem) for a text size of `percent`, within 75 % and 125 % of the usual 16 px.
+pub fn rem_for(percent: u16) -> f32 {
+    16.0 * f32::from(percent.clamp(75, 125)) / 100.0
+}
+
+fn is_zero_u16(v: &u16) -> bool {
+    *v == 0
 }
 
 impl Default for ColumnPrefs {
@@ -333,6 +394,7 @@ impl Default for ColumnPrefs {
             git_hash: false,
             git_widths: [240, 130, 140, 90],
             properties: Vec::new(),
+            name_width: 0,
         }
     }
 }
@@ -386,11 +448,18 @@ pub struct Settings {
     pub preview_open: bool,
     /// The preview pane of the Open/Save dialogs, kept apart from the main windows' (shown until it is closed once: issue 87).
     pub picker_preview_open: bool,
+    /// The Open/Save dialog's size as the user left it (logical px), as Windows' own dialogs remember theirs. Issue 89: "the size of
+    /// the file selection window ... is too large for a standard 1920x1080 px laptop screen".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub picker_size: Option<[u16; 2]>,
     pub sidebar_open: bool,
     /// The sidebar as a narrow strip of icons (drag it narrow to get there).
     pub sidebar_rail: bool,
     /// Pane widths (drag the pane edge to resize).
     pub sidebar_width: f32,
+    /// Width used only while the Windows File Explorer look is enabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explorer_sidebar_width: Option<f32>,
     /// Sidebar sections the user turned off ("drives", "cloud", "libraries", "network", "tags").
     pub sidebar_hidden: Vec<String>,
     /// Sections of the Home page that are hidden: "quick", "drives", "devices", "tags",
@@ -414,9 +483,18 @@ pub struct Settings {
     /// Where the preview pane sits: at the right of the list (the default) or under it. The key is written only for "bottom".
     #[serde(skip_serializing_if = "rf_core::previewpane::PreviewPos::is_right")]
     pub preview_position: rf_core::previewpane::PreviewPos,
+    /// The Properties window's size (logical px) as the user last left it; `None`: the default size (`properties_view::DEFAULT_SIZE`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub props_size: Option<[f32; 2]>,
+    /// The icon file of rustyfiles' own shortcuts (Start menu, desktop, taskbar pin); `None`: the program's own (`rf_win::app_icon`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_icon: Option<String>,
     /// The pane's height at the bottom (drag its top edge). Written only once the user has moved it.
     #[serde(skip_serializing_if = "is_default_preview_height")]
     pub preview_height: f32,
+    /// The file's details under its preview (type, size, dates, location, the hash button). Asked for on the rustyfiles Discord: "Hope
+    /// the Properties can have an option to hide".
+    pub preview_details: bool,
     pub renderer: RendererPref,
     pub restore_session: bool,
     /// Last session's tab locations ("" = Home).
@@ -434,6 +512,10 @@ pub struct Settings {
     /// The drives that are not listed (the sidebar, the Home page, the address bar's list of drives), as letters ("V"). A drive
     /// Explorer hides by its own policy is hidden too, without being named here (`rf_win::drives::visible_drives`).
     pub hidden_drives: Vec<String>,
+    /// Cloud and WSL places taken off the sidebar one by one (their paths). Issue 141: "a way to hide a single entry in that section
+    /// (right click > Hide), like "Hidden drives"".
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hidden_places: Vec<String>,
     /// The accent colour of rustyfiles as "#RRGGBB"; empty: Windows' own accent (Settings > Appearance).
     pub accent_color: String,
     /// The user's own programs for kinds of files (Settings > File types; `rf_core::openrules`): the first program of a list opens
@@ -469,6 +551,10 @@ pub struct Settings {
     /// Custom shortcuts: keystroke → action, e.g. `"ctrl-k" = "NewFolder"` (names as in the
     /// command palette's actions; `rustyfiles::` prefix optional). Applied at startup.
     pub keybindings: std::collections::BTreeMap<String, String>,
+    /// The folder an app's Open / Save window always starts in, whatever folder the app asks for: the app's program name in lower
+    /// case ("firefox.exe") to the folder. Set and cleared with the pin button of the dialog itself; listed in Settings › Advanced.
+    /// A user on Discord, 2026-11-21: "per program default ... Say I use firefox ... open default storage location where i set it".
+    pub dialog_folders: std::collections::BTreeMap<String, String>,
     /// Last window placement: [x, y, width, height, maximized (0/1)].
     pub window: Option<[f32; 5]>,
     /// Display UUID and the normal window's origin relative to that display.
@@ -483,6 +569,10 @@ pub struct Settings {
     /// What a new tab opens (Ctrl+T, the "+" button, the tab menu): Home (the default) or the folder of the tab in front (a Reddit
     /// suggestion, 2026-11-18). Duplicating a tab keeps its folder either way.
     pub new_tab_opens: NewTabOpens,
+    /// A new tab (Ctrl+T, the + button) puts the keyboard in the address bar, ready for a typed or pasted path (issue 240).
+    pub new_tab_address: bool,
+    /// The details shown when the pointer rests on an item (size, dates, a picture's size). Issue 264: some find them in the way.
+    pub item_hover_details: bool,
     /// A folder opened from outside (Win+E, the desktop, another program) gets a window of its own instead of a tab in the newest
     /// window (issue 77). Off by default.
     pub launch_in_new_window: bool,
@@ -499,7 +589,21 @@ pub struct Settings {
     // ---- Appearance
     /// A scrollbar over the Details and Grid lists.
     pub show_scrollbar: bool,
+    /// Generic file icons. `Windows` uses the shell, as before.
+    pub icon_theme: IconThemePref,
+    /// Folder name of a freedesktop pack under `%APPDATA%\rustyfiles\icon-themes` (empty = none).
+    pub icon_theme_pack: String,
     pub animations: AnimPref,
+    /// Extend the Windows File Explorer look to the navigation, toolbar, and file-list appearance.
+    pub windows_file_explorer_theme: bool,
+    /// "Compact window": the tab row, the address bar and the command bar are thinner and the content card has no margin or round
+    /// corners at its right and bottom; icons and text keep their size (a Discord request, 2026-11-22: room on small laptop screens).
+    #[serde(default)]
+    pub compact_window: bool,
+    /// "Compact items", Explorer's "Compact view": every folder's Details rows are thinner (30 → 22 at the default size) and the grid's
+    /// tiles closer, the name nearer its picture (a Discord request, 2026-11-23).
+    #[serde(default)]
+    pub compact_items: bool,
     pub backdrop: BackdropPref,
     /// Background tint color (0xRRGGBB), `None` = the backdrop as is.
     pub tint: Option<u32>,
@@ -518,6 +622,10 @@ pub struct Settings {
     pub hg_freeze_behind: bool,
     /// UI font family; `None` = Segoe UI Variable / system.
     pub font: Option<String>,
+    /// The text size of the file manager's windows, percent of the usual (87, 100 or 112). Issue 89: "For lower resolution screens,
+    /// the current font size is too large". It sets the windows' base size, which the texts are measured in.
+    #[serde(skip_serializing_if = "is_hundred")]
+    pub text_percent: u16,
     pub show_toolbar: bool,
     pub show_statusbar: bool,
 
@@ -537,6 +645,9 @@ pub struct Settings {
     /// Names starting with "." count as hidden when off.
     pub show_dot_files: bool,
     pub show_thumbnails: bool,
+    /// The marks sync and version-control programs put on icons in Explorer (Google Drive, OneDrive, TortoiseGit, Dropbox), drawn
+    /// over ours. A user on Discord, 2026-11-20.
+    pub show_overlays: bool,
     pub show_checkboxes: bool,
     pub single_click: ClickPref,
     pub open_folders_in_new_tab: bool,
@@ -545,12 +656,24 @@ pub struct Settings {
     pub select_on_hover: bool,
     /// Each tab as wide as its name (within the usual limits) instead of all tabs equally wide. Issue 119.
     pub tabs_fit_names: bool,
+    /// The List layout fills each column from top to bottom and scrolls sideways, as Explorer's List does (issue 170).
+    pub list_columns_first: bool,
+    /// A folder's tab shows its whole path (smaller, cut at the end) instead of its name (issue 162).
+    pub tab_shows_path: bool,
+    /// Explorer windows that other programs open are closed and their place opened here (issue 37). Off by default.
+    pub catch_explorer_windows: bool,
+    /// A theme folder's name in `<settings folder>\themes` (colours and icons, issues 93 and 94); empty: none.
+    pub theme_folder: String,
+    /// The terminal button on each folder's tab. Issue 119: it was in the way of clicks on narrow tabs.
+    pub tab_terminal_button: bool,
     /// Typing in a folder's list filters it by name (the filter bar opens with the letters); off: typing selects the item whose
     /// name starts with them. Issue 106.
     pub type_to_filter: bool,
     pub double_click_up: bool,
     pub select_previous_on_up: bool,
     pub decimal_sizes: bool,
+    /// With binary sizes: KiB, MiB, GiB instead of Explorer's KB, MB, GB (a request on Discord, 2026-11-23).
+    pub binary_prefixes: bool,
     pub calculate_folder_sizes: bool,
     /// Folders show their size on disk (files rounded up to whole clusters) instead of the sum
     /// of their file sizes.
@@ -560,6 +683,9 @@ pub struct Settings {
     pub fast_file_ops: bool,
     /// Check copies after writing them.
     pub copy_verify: CopyVerify,
+    /// A copy into a WSL distribution leaves no "file:Zone.Identifier" file beside it (the download mark Windows writes there as a
+    /// file of its own). A user on Discord, 2026-11-20.
+    pub wsl_drop_zone: bool,
     /// Copy speed limit in MB/s (0 = none).
     pub copy_speed_limit: u32,
     /// Where a running operation's progress is shown (see [`TransferProgress`]).
@@ -567,6 +693,8 @@ pub struct Settings {
     /// The thumbnail cache's limit in MB (the cache is in memory); `None` = the default, 64 MB, and no key in the file.
     pub thumb_cache_mb: Option<u32>,
     pub show_libraries: bool,
+    /// Each drive in the sidebar says how much of it is used, in numbers ("238 GB / 500 GB"), under its bar. Issue 167.
+    pub sidebar_drive_space: bool,
     /// A "Klasörler" section in the sidebar: the folder tree (drives and the profile folder as roots). Off by default.
     pub sidebar_tree: bool,
     /// The tree opens the branch to the open folder, marks it and scrolls it into view after every navigation.
@@ -577,6 +705,11 @@ pub struct Settings {
     pub address_commands: bool,
     /// Double-clicking a ZIP/7z/tar opens it like a folder (read-only).
     pub browse_archives: bool,
+    /// Where an archive opened like a folder goes (Discord, 2026-11-20: "an option/toggle to make zips open separately from the
+    /// normal window").
+    pub archives_open_in: ArchiveOpen,
+    /// What a click on "Sıkıştır" in the right-click menu does: compress at once in this format, or (`Menu`) only open its submenu.
+    pub quick_compress: QuickCompress,
     /// After extracting an archive into a new folder, that folder opens in a tab.
     pub open_after_extract: bool,
     /// Search through the Windows Search index (contents, AQS) where the folder is indexed.
@@ -585,11 +718,18 @@ pub struct Settings {
     pub name_index: bool,
     /// Folders left out of the name index (searching inside them walks the disk).
     pub index_excluded: Vec<String>,
+    /// Hard drives (disks with a seek penalty) in the name index too: off by default, walking one is minutes of audible seeking.
+    pub index_hard_drives: bool,
 
     // ---- Developer tools
     pub ide_button: IdePref,
     /// Editor to open folders with ("code" when empty and VS Code is installed).
     pub ide_path: String,
+    /// "Open in Terminal" starts this program (a path or a name such as `cmd.exe`); empty: Windows Terminal, else PowerShell (issue 224).
+    pub terminal_path: String,
+    /// The program "Edit" (F4) opens files with: empty is Notepad (Discord, 2026-11-23: "select an alternative editor (e.g. Sublime
+    /// Text, Notepad++, VS Code)").
+    pub text_editor_path: String,
 
     // ---- Advanced
     pub show_flatten: bool,
@@ -651,14 +791,29 @@ pub struct Settings {
     /// The dock hides at the bottom of the screen and comes up when the pointer reaches the edge (off; issue 112). It reserves no
     /// band then: windows use the whole screen.
     pub dock_autohide: bool,
+    /// With auto-hide on: the dock hides only while a window lies where it stands, and comes back up when that window is minimised,
+    /// closed or moved away (off: it hides whenever the pointer leaves it). A user on Discord, 2026-11-20.
+    pub dock_autohide_windows: bool,
     /// The dock's islands on a solid fill instead of the glass (off; issue 113).
     pub dock_opaque: bool,
+    /// The Dock without its motions and on a solid fill: less work while a game keeps the graphics card busy (issue 133).
+    pub dock_performance: bool,
+    /// A thin "Show desktop" strip at the right end of the primary monitor's right island, after the bell, as on Windows' taskbar (off;
+    /// issue 127).
+    pub dock_show_desktop: bool,
+    /// The app's name under each icon of the middle island (off). Issue 137: "would really like to see app names under the icon".
+    pub dock_labels: bool,
+    /// Pinned apps that are not running stand in the left island, as launchers; the middle one holds the running apps (off). Issue 137:
+    /// "I would like to see apps pinned appearing on the left dock when they are not open".
+    pub dock_pins_left: bool,
     /// The left island's search: a field, its button only, or none (`DockSearch`).
     pub dock_search: DockSearch,
     /// A click on the dock's search field or button opens HyperSearch instead of the Start panel (issue 41). Off by default.
     pub dock_search_hypersearch: bool,
     /// The tray icons of the right island stand closer together (18 px a cell instead of 24; off). Issue 34.
     pub dock_tray_compact: bool,
+    /// The tray icons in two rows at their usual size (off). Issue 34: compact was too small on a wide screen.
+    pub dock_tray_two_rows: bool,
     /// Turning the mouse wheel over a running app's icon in the dock turns that app's own sound level up or down (on; issue 21).
     pub dock_scroll_volume: bool,
     /// How much the dock's icons grow under the pointer (off / subtle / full).
@@ -772,9 +927,11 @@ impl Default for Settings {
             show_hidden: false,
             preview_open: true,
             picker_preview_open: true,
+            picker_size: None,
             sidebar_open: true,
             sidebar_rail: false,
-            sidebar_width: 232.,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            explorer_sidebar_width: None,
             sidebar_hidden: Vec::new(),
             home_hidden: Vec::new(),
             recent_cleared_ms: 0,
@@ -794,6 +951,7 @@ impl Default for Settings {
             pinned: None,
             folder_aliases: Default::default(),
             hidden_drives: Vec::new(),
+            hidden_places: Vec::new(),
             accent_color: String::new(),
             open_rules: Vec::new(),
             run_in_background: false,
@@ -810,6 +968,7 @@ impl Default for Settings {
             adaptive_offered: false,
             show_extensions: true,
             keybindings: Default::default(),
+            dialog_folders: Default::default(),
             window: None,
             window_display: None,
             date_format: DatePref::Application,
@@ -817,6 +976,8 @@ impl Default for Settings {
             startup_pages: Vec::new(),
             focus_new_tab: false,
             new_tab_opens: NewTabOpens::Home,
+            new_tab_address: false,
+            item_hover_details: true,
             launch_in_new_window: false,
             sessions_in_this_window: false,
             dual_pane_new_tabs: false,
@@ -824,7 +985,14 @@ impl Default for Settings {
             menu: MenuPrefs::default(),
             smooth_scroll: true,
             show_scrollbar: true,
+            icon_theme: IconThemePref::Windows,
+            icon_theme_pack: String::new(),
             animations: AnimPref::System,
+            windows_file_explorer_theme: false,
+            compact_window: false,
+            compact_items: false,
+            props_size: None,
+            app_icon: None,
             backdrop: BackdropPref::Mica,
             tint: None,
             background_image: None,
@@ -836,6 +1004,7 @@ impl Default for Settings {
             hg_surface: HG_DEFAULT[4],
             hg_freeze_behind: false,
             font: None,
+            text_percent: 100,
             show_toolbar: true,
             show_statusbar: true,
             sync_layout: false,
@@ -848,6 +1017,7 @@ impl Default for Settings {
             show_system_files: false,
             show_dot_files: true,
             show_thumbnails: true,
+            show_overlays: true,
             show_checkboxes: false,
             single_click: ClickPref::Never,
             open_folders_in_new_tab: false,
@@ -855,28 +1025,42 @@ impl Default for Settings {
             warn_extension_change: true,
             select_on_hover: false,
             tabs_fit_names: false,
+            list_columns_first: false,
+            tab_shows_path: false,
+            catch_explorer_windows: false,
+            theme_folder: String::new(),
+            tab_terminal_button: true,
+            preview_details: true,
             type_to_filter: false,
             double_click_up: true,
             select_previous_on_up: true,
             decimal_sizes: false,
+            binary_prefixes: false,
             calculate_folder_sizes: false,
             folder_size_on_disk: false,
             fast_file_ops: true,
             copy_verify: CopyVerify::Off,
+            wsl_drop_zone: false,
             copy_speed_limit: 0,
             transfer_progress: TransferProgress::StatusBar,
             thumb_cache_mb: None,
             show_libraries: false,
+            sidebar_drive_space: false,
             sidebar_tree: false,
             sidebar_tree_follow: true,
             address_commands: true,
             browse_archives: true,
+            quick_compress: QuickCompress::Zip,
+            archives_open_in: ArchiveOpen::Here,
             open_after_extract: false,
             search_index: true,
             name_index: true,
             index_excluded: Vec::new(),
+            index_hard_drives: false,
             ide_button: IdePref::GitRepos,
             ide_path: String::new(),
+            terminal_path: String::new(),
+            text_editor_path: String::new(),
             show_flatten: false,
             space_quicklook: false,
             directlook_enabled: true,
@@ -899,10 +1083,16 @@ impl Default for Settings {
             dock_status_hidden: Vec::new(),
             dock_side_tall: false,
             dock_autohide: false,
+            dock_autohide_windows: false,
             dock_opaque: false,
+            dock_performance: false,
+            dock_show_desktop: false,
+            dock_labels: false,
+            dock_pins_left: false,
             dock_search: DockSearch::Field,
             dock_search_hypersearch: false,
             dock_tray_compact: false,
+            dock_tray_two_rows: false,
             dock_scroll_volume: true,
             dock_magnify: DockMagnify::Full,
             dock_hover_previews: true,
@@ -946,6 +1136,12 @@ impl Global for Settings {}
 pub const HG_DEFAULT: [u8; 5] = [52, 50, 67, 62, 50];
 
 static THEME: AtomicU8 = AtomicU8::new(0);
+static WINDOWS_FILE_EXPLORER_THEME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static COMPACT_WINDOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static COMPACT_ITEMS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ICON_THEME: AtomicU8 = AtomicU8::new(0);
+/// The selected freedesktop pack's folder name, read by the icon cache without a `Settings` global.
+static ICON_PACK: std::sync::OnceLock<parking_lot::RwLock<String>> = std::sync::OnceLock::new();
 /// The surface value (0..=100) the palette reads on every call, cheaper than the settings struct.
 static HG_SURFACE: AtomicU8 = AtomicU8::new(HG_DEFAULT[4]);
 static SOLID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -1002,6 +1198,61 @@ pub fn theme_override() -> ThemePref {
     }
 }
 
+/// Read by the window palette without needing an `App`.
+/// The setting "Compact window", read without an `App` (the bars' heights, see `theme::titlebar_h`).
+pub fn compact_window() -> bool {
+    COMPACT_WINDOW.load(Ordering::Relaxed)
+}
+
+/// The setting "Compact items", read without an `App` (the lists' row heights, see `FolderView::row_h`).
+pub fn compact_items() -> bool {
+    COMPACT_ITEMS.load(Ordering::Relaxed)
+}
+
+pub fn windows_file_explorer_theme() -> bool {
+    WINDOWS_FILE_EXPLORER_THEME.load(Ordering::Relaxed)
+}
+
+/// Effective light/dark appearance without needing an `App`. Kept in an atomic: rows ask for it on every frame,
+/// and `ThemePref::System` would otherwise read the registry for every row. Icon packs use it to pick a matching variant.
+pub fn effective_dark() -> bool {
+    static DARK: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+    DARK.get_or_init(|| std::sync::atomic::AtomicBool::new(compute_effective_dark())).load(Ordering::Relaxed)
+}
+
+fn compute_effective_dark() -> bool {
+    match theme_override() {
+        ThemePref::Light => false,
+        ThemePref::Dark | ThemePref::Black => true,
+        ThemePref::System => rf_win::accent::system_is_dark(),
+    }
+}
+
+/// The OS appearance changed while the app was open. Only `System` follows it; a fixed choice stays.
+pub fn system_appearance_changed(dark: bool) {
+    if theme_override() == ThemePref::System {
+        set_effective_dark(dark);
+    }
+}
+
+fn set_effective_dark(dark: bool) {
+    static DARK: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
+    DARK.get_or_init(|| std::sync::atomic::AtomicBool::new(false)).store(dark, Ordering::Relaxed);
+}
+
+/// Read without a `Settings` global, for the shared icon cache.
+pub fn icon_theme() -> IconThemePref {
+    match ICON_THEME.load(Ordering::Relaxed) {
+        2 => IconThemePref::Freedesktop,
+        _ => IconThemePref::Windows,
+    }
+}
+
+/// The selected freedesktop pack's folder name.
+pub fn icon_theme_pack() -> String {
+    ICON_PACK.get_or_init(|| parking_lot::RwLock::new(String::new())).read().clone()
+}
+
 pub fn path() -> Option<PathBuf> {
     app_dir().map(|d| d.join("settings.toml"))
 }
@@ -1015,7 +1266,21 @@ enum FileRead {
     Read(Box<Settings>),
 }
 
+const DEFAULT_SIDEBAR_WIDTH: f32 = 232.;
+const DEFAULT_EXPLORER_SIDEBAR_WIDTH: f32 = 366.;
+
 impl Settings {
+    /// Keep a user's existing single sidebar width when first enabling the separate Explorer width.
+    pub(crate) fn sidebar_width_for_explorer_look(&self) -> f32 {
+        self.explorer_sidebar_width.unwrap_or_else(|| {
+            if self.sidebar_width == DEFAULT_SIDEBAR_WIDTH {
+                DEFAULT_EXPLORER_SIDEBAR_WIDTH
+            } else {
+                self.sidebar_width
+            }
+        })
+    }
+
     /// Reads the file. With `set_aside_bad` an unreadable or broken file is moved aside (so the next save does not overwrite what
     /// the user may want to repair); a reader that is not the owner of the file leaves it where it is.
     fn read_file(set_aside_bad: bool) -> FileRead {
@@ -1183,14 +1448,17 @@ impl Settings {
     }
 
     pub(crate) fn apply_side_effects(&self) {
-        sync_name_index(self.name_index, &self.index_excluded);
+        sync_name_index(self.name_index, &self.index_excluded, self.index_hard_drives);
         crate::i18n::set(self.language);
         crate::aliases::set(self.folder_aliases.clone());
         rf_win::openrules::set(self.open_rules.clone());
+        rf_win::shell::set_terminal(&self.terminal_path);
         rf_win::drives::set_hidden(rf_win::drives::mask_of_letters(&self.hidden_drives));
         // (a text that is no colour is no colour: Windows' accent)
         rf_win::accent::set_override(rf_win::accent::parse_hex(&self.accent_color));
         crate::background::sync_tray(self.run_in_background);
+        crate::background::sync_explorer_catch(self.catch_explorer_windows);
+        crate::themes::set(&self.theme_folder);
         crate::quick_search::sync(self);
         // (the system's own short date and time for the "System" style and older dates, issue 59; set once)
         rf_core::format::set_system_format(rf_win::datefmt::short_date_time);
@@ -1200,14 +1468,26 @@ impl Settings {
             DatePref::Universal => rf_core::format::DateStyle::Universal,
         });
         rf_core::format::set_decimal_sizes(self.decimal_sizes);
+        rf_core::format::set_binary_prefixes(self.binary_prefixes);
         SOLID.store(self.backdrop == BackdropPref::Solid, Ordering::Relaxed);
         MAIN_ONLY.store(main_window_only(self.backdrop), Ordering::Relaxed);
-        ANIM.store(self.animations as u8, Ordering::Relaxed);
+        // (the Dock's performance mode: no motion in the Dock's process, whatever the app's own setting)
+        let dock_still = self.dock_performance && crate::background::DOCK_PROCESS.load(Ordering::Relaxed);
+        ANIM.store(if dock_still { AnimPref::Off as u8 } else { self.animations as u8 }, Ordering::Relaxed);
         // HyperGlass: the engine redraws every glass window once when the look changes, and does nothing for the same look again
         HG_SURFACE.store(self.hg_surface.min(100), Ordering::Relaxed);
         rf_win::glass::set_look(self.hyperglass_look());
         rf_win::glass::set_freeze_when_behind(self.hg_freeze_behind);
         gpui_windows::SMOOTH_SCROLL.store(self.smooth_scroll, Ordering::Relaxed);
+        WINDOWS_FILE_EXPLORER_THEME.store(self.windows_file_explorer_theme, Ordering::Relaxed);
+        COMPACT_WINDOW.store(self.compact_window, Ordering::Relaxed);
+        COMPACT_ITEMS.store(self.compact_items, Ordering::Relaxed);
+        // (Windows' own menus shown by this process: the classic context menu, issue 211)
+        rf_win::menu_theme::set_wanted(match self.theme {
+            ThemePref::System => None,
+            ThemePref::Light => Some(false),
+            ThemePref::Dark | ThemePref::Black => Some(true),
+        });
         THEME.store(
             match self.theme {
                 ThemePref::System => 0,
@@ -1217,6 +1497,12 @@ impl Settings {
             },
             Ordering::Relaxed,
         );
+        set_effective_dark(compute_effective_dark());
+        ICON_THEME.store(match self.icon_theme {
+            IconThemePref::Freedesktop => 2,
+            IconThemePref::Windows | IconThemePref::Legacy => 0,
+        }, Ordering::Relaxed);
+        *ICON_PACK.get_or_init(|| parking_lot::RwLock::new(String::new())).write() = self.icon_theme_pack.clone();
         // An explicit RUSTYFILES_RENDERER env var wins (debugging).
         if std::env::var_os("RUSTYFILES_RENDERER").is_none() {
             gpui_windows::hybrid::set_mode(renderer_mode(self.renderer, crate::background::DOCK_PROCESS.load(Ordering::Relaxed)));
@@ -1266,19 +1552,55 @@ pub fn apply_component_theme(cx: &mut App) {
     }
 }
 
+/// Rasterize the common pack icons before the next paint. A new pack (or a new light/dark variant)
+/// would otherwise make the first folder render parse every SVG on the UI thread.
+pub fn prewarm_icon_pack(cx: &mut App) {
+    let s = cx.global::<Settings>();
+    if s.icon_theme != IconThemePref::Freedesktop || s.icon_theme_pack.is_empty() {
+        return;
+    }
+    // COM known-folder lookups happen once here, before rows ask for their icon names.
+    crate::icon_theme::prewarm_known_folders();
+    let pack = s.icon_theme_pack.clone();
+    cx.spawn(async move |cx| {
+        cx.background_executor().spawn(async move { crate::icon_theme::prewarm(&pack) }).await;
+        cx.update(|cx| cx.refresh_windows());
+    })
+    .detach();
+}
+
 /// Mutates the global settings, applies side effects, saves in the background and refreshes windows.
 pub fn update(cx: &mut App, f: impl FnOnce(&mut Settings)) {
+    let old = cx.global::<Settings>().clone();
+    let explorer_theme_before = old.windows_file_explorer_theme;
     cx.update_global::<Settings, _>(|s, _| f(s));
     let s = cx.global::<Settings>().clone();
+    // (DirectLook reads both from the file: the explorer theme, and background mode for whether it shows its own tray icon)
+    let directlook_reload = s.windows_file_explorer_theme != explorer_theme_before || s.run_in_background != old.run_in_background;
     s.apply_side_effects();
     apply_component_theme(cx);
+    let icon_pack_changed = s.icon_theme != old.icon_theme || s.icon_theme_pack != old.icon_theme_pack;
+    let theme_changed = s.theme != old.theme;
     std::thread::spawn(move || {
         s.save();
+        // after the save, or DirectLook reads the old value (two tray icons once background mode was turned on)
+        if directlook_reload {
+            crate::look::ipc::send(crate::look::ipc::Msg::Reload, false);
+        }
         // after the save: the dock process reads the file when it is told to reload
         crate::dock::control::sync_process(&s);
     });
     // (Ferry follows its settings: started, stopped, started anew, or shown to others differently)
     crate::ferry::apply(cx);
+    if icon_pack_changed || theme_changed {
+        // A newly installed pack must be visible without a restart, and a system-theme switch must pick the other variant.
+        crate::icon_theme::clear_caches();
+        crate::image_cache::clear_for_pack_change(cx);
+    }
+    if icon_pack_changed {
+        crate::icon_theme::refresh_packs();
+        prewarm_icon_pack(cx);
+    }
     cx.refresh_windows();
 }
 
@@ -1286,8 +1608,15 @@ pub fn update(cx: &mut App, f: impl FnOnce(&mut Settings)) {
 /// written once the changes have settled (the pane resize does the same), so a drag is not hundreds of writes.
 pub fn update_live(cx: &mut App, f: impl FnOnce(&mut Settings)) {
     static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let old = cx.global::<Settings>().clone();
     cx.update_global::<Settings, _>(|s, _| f(s));
     cx.global::<Settings>().apply_side_effects();
+    let look_changed = old.theme != cx.global::<Settings>().theme;
+    if look_changed {
+        crate::icon_theme::clear_caches();
+        crate::image_cache::clear_for_pack_change(cx);
+        prewarm_icon_pack(cx);
+    }
     cx.refresh_windows();
     let mine = SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
     cx.spawn(async move |cx| {
@@ -1350,7 +1679,26 @@ mod tests {
         // unknown/missing keys fall back to defaults
         let partial: Settings = toml::from_str("theme = \"dark\"").unwrap();
         assert_eq!(partial.theme, ThemePref::Dark);
+        // a settings file written before icon themes keeps the shell icons
+        assert_eq!(partial.icon_theme, super::IconThemePref::Windows);
+        let legacy: Settings = toml::from_str("icon_theme = \"xp\"").unwrap();
+        assert_eq!(legacy.icon_theme, super::IconThemePref::Legacy);
         assert!(partial.restore_session);
+    }
+
+    /// The Freedesktop choice and its pack survive the file; an unknown choice is inert, a bad pack is dropped.
+    #[test]
+    fn icon_theme_choice_and_pack_roundtrip() {
+        let s = Settings { icon_theme: super::IconThemePref::Freedesktop, icon_theme_pack: "Papirus".into(), ..Default::default() };
+        let back: Settings = toml::from_str(&toml::to_string_pretty(&s).unwrap()).unwrap();
+        assert_eq!(back.icon_theme, super::IconThemePref::Freedesktop);
+        assert_eq!(back.icon_theme_pack, "Papirus");
+        let modern: Settings = toml::from_str("icon_theme = \"freedesktop\"\nicon_theme_pack = \"Adwaita\"\n").unwrap();
+        assert_eq!(modern.icon_theme, super::IconThemePref::Freedesktop);
+        assert_eq!(modern.icon_theme_pack, "Adwaita");
+        let bad = Settings::parse_lenient("icon_theme = \"nope\"\nicon_theme_pack = 7\n").unwrap();
+        assert_eq!(bad.icon_theme, super::IconThemePref::Legacy, "an unknown older value stays inert");
+        assert!(bad.icon_theme_pack.is_empty(), "a non-string pack is ignored");
     }
 
     /// The second panes of the session survive the settings file, and a file from before them has none.
@@ -1395,6 +1743,10 @@ pub fn local_data_dir() -> Option<std::path::PathBuf> {
     if let Some(d) = std::env::var_os("RUSTYFILES_CONFIG_DIR").filter(|d| !d.is_empty()) {
         return Some(std::path::PathBuf::from(d));
     }
+    // the portable copy keeps everything in its own folder (issue 71)
+    if let Some(d) = rf_win::portable::data_dir() {
+        return Some(d);
+    }
     dirs::data_local_dir().map(|d| d.join("rustyfiles"))
 }
 
@@ -1403,12 +1755,37 @@ pub fn app_dir() -> Option<std::path::PathBuf> {
     if let Some(d) = std::env::var_os("RUSTYFILES_CONFIG_DIR").filter(|d| !d.is_empty()) {
         return Some(std::path::PathBuf::from(d));
     }
+    // the portable copy: its own `data` folder (`rf_win::portable`, issue 71)
+    if let Some(d) = rf_win::portable::data_dir() {
+        return Some(d);
+    }
     dirs::config_dir().map(|d| d.join("rustyfiles"))
 }
 
 #[cfg(test)]
 mod lenient_tests {
-    use super::Settings;
+    use super::{DEFAULT_EXPLORER_SIDEBAR_WIDTH, DEFAULT_SIDEBAR_WIDTH, Settings};
+
+    #[test]
+    fn windows_file_explorer_theme_defaults_off_and_round_trips() {
+        assert!(!Settings::default().windows_file_explorer_theme);
+        assert_eq!(Settings::default().sidebar_width, DEFAULT_SIDEBAR_WIDTH);
+        assert_eq!(Settings::default().explorer_sidebar_width, None);
+        assert_eq!(Settings::default().sidebar_width_for_explorer_look(), DEFAULT_EXPLORER_SIDEBAR_WIDTH);
+        assert_eq!(
+            Settings { sidebar_width: 420., ..Default::default() }.sidebar_width_for_explorer_look(),
+            420.
+        );
+        assert!(!Settings::parse_lenient("theme = \"dark\"\n").unwrap().windows_file_explorer_theme, "older settings files omit the new option");
+
+        let enabled = Settings { windows_file_explorer_theme: true, explorer_sidebar_width: Some(410.), ..Default::default() };
+        let text = toml::to_string_pretty(&enabled).unwrap();
+        assert!(text.contains("windows_file_explorer_theme = true"));
+        let back = Settings::parse_lenient(&text).unwrap();
+        assert!(back.windows_file_explorer_theme);
+        assert_eq!(back.explorer_sidebar_width, Some(410.));
+        assert_eq!(back.sidebar_width_for_explorer_look(), 410.);
+    }
 
     #[test]
     fn unknown_values_fall_back_per_field() {
@@ -1514,7 +1891,7 @@ theme = \"dark\"
 
 /// Starts or stops the name index when the setting changes. The first start waits a few seconds
 /// so it never competes with opening the window.
-fn sync_name_index(on: bool, excluded: &[String]) {
+fn sync_name_index(on: bool, excluded: &[String], hard_drives: bool) {
     use std::sync::atomic::{AtomicU8, Ordering};
     // DirectLook reads these settings too: the index is rustyfiles' (a second indexer would walk
     // every drive again and write the same index files)
@@ -1524,6 +1901,7 @@ fn sync_name_index(on: bool, excluded: &[String]) {
     // 0 = not decided yet, 1 = off, 2 = on
     static STATE: AtomicU8 = AtomicU8::new(0);
     static EXCLUDED: parking_lot::Mutex<Option<Vec<String>>> = parking_lot::Mutex::new(None);
+    static HARD_DRIVES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let list_changed = {
         let mut e = EXCLUDED.lock();
         let changed = e.as_deref() != Some(excluded);
@@ -1531,11 +1909,12 @@ fn sync_name_index(on: bool, excluded: &[String]) {
             *e = Some(excluded.to_vec());
             rf_win::nameindex::set_excluded(&excluded.iter().map(std::path::PathBuf::from).collect::<Vec<_>>());
         }
-        changed
+        // (hard drives in or out: another set of roots, started anew like a changed list)
+        HARD_DRIVES.swap(hard_drives, Ordering::Relaxed) != hard_drives || changed
     };
     let want = if on { 2 } else { 1 };
     let was = STATE.swap(want, Ordering::Relaxed);
-    // a changed exclusion list rebuilds a running index (the fresh walk leaves the folders out)
+    // a changed exclusion list rebuilds a running index (the fresh walk leaves the folders out); so do hard drives taken in or out
     if was == want && !(on && list_changed && was != 0) {
         return;
     }
@@ -1553,14 +1932,14 @@ fn sync_name_index(on: bool, excluded: &[String]) {
             return;
         }
         // a copy with its own settings folder (tests, portable) keeps its index there too
-        let dir = match std::env::var_os("RUSTYFILES_CONFIG_DIR") {
-            Some(cfg) => std::path::PathBuf::from(cfg).join("index"),
+        let dir = match std::env::var_os("RUSTYFILES_CONFIG_DIR").map(std::path::PathBuf::from).or_else(rf_win::portable::data_dir) {
+            Some(cfg) => cfg.join("index"),
             None => std::env::var_os("LOCALAPPDATA").map_or_else(std::env::temp_dir, std::path::PathBuf::from).join("rustyfiles").join("index"),
         };
         // RUSTYFILES_INDEX_ROOTS="E:\;F:\" picks the roots (testing)
         let roots = match std::env::var("RUSTYFILES_INDEX_ROOTS") {
             Ok(v) => v.split(';').filter(|s| !s.is_empty()).map(std::path::PathBuf::from).collect(),
-            Err(_) => rf_win::indexer::local_roots(),
+            Err(_) => rf_win::indexer::local_roots(HARD_DRIVES.load(Ordering::Relaxed)),
         };
         rf_win::indexer::start(roots, dir);
     });

@@ -7,7 +7,7 @@ enum SettingsPage: CaseIterable {
     /// Marked "Experimental" in the page list, as on Windows.
     var isExperimental: Bool { self == .ferry }
 
-    case general, appearance, layout, files, fileTypes, actions, tags, ferry, dev, advanced, speed, organizer, about
+    case general, appearance, layout, files, fileTypes, actions, tags, ferry, addons, advanced, speed, organizer, about
 
     var title: String {
         switch self {
@@ -18,11 +18,11 @@ enum SettingsPage: CaseIterable {
         case .tags: String(localized: "Tags")
         case .fileTypes: String(localized: "File types")
         case .actions: String(localized: "Keyboard shortcuts")
-        case .dev: String(localized: "Developer tools")
         case .advanced: String(localized: "Advanced")
         case .speed: String(localized: "Speed test")
         case .organizer: String(localized: "File organizer")
         case .ferry: "Ferry"
+        case .addons: String(localized: "Add-ons")
         case .about: String(localized: "About")
         }
     }
@@ -36,11 +36,11 @@ enum SettingsPage: CaseIterable {
         case .tags: "tag"
         case .fileTypes: "file-type"
         case .actions: "keyboard"
-        case .dev: "square-terminal"
         case .advanced: "wrench"
         case .speed: "gauge"
         case .organizer: "wand-sparkles"
         case .ferry: "send"
+        case .addons: "puzzle"
         case .about: "info"
         }
     }
@@ -89,7 +89,7 @@ enum SettingsContent {
                     detail: String(localized: "Takes effect when rustyfiles opens again."),
                     icon: "languages",
                     control: .choice(
-                        options: [("system", String(localized: "System")), ("en", "English"), ("tr", "Türkçe")],
+                        options: [("system", String(localized: "System"))] + AppSettings.languages,
                         get: { AppSettings.language },
                         set: { AppSettings.language = $0 })),
                 .card(
@@ -140,6 +140,10 @@ enum SettingsContent {
                     icon: "eye-off",
                     control: .toggle(get: { AppSettings.showHidden }, set: { AppSettings.showHidden = $0 })),
                 .card(
+                    title: String(localized: "Show macOS system files"), detail: String(localized: "Files like .DS_Store and .localized, which macOS keeps for itself; shown only with hidden items."),
+                    icon: "shield",
+                    control: .toggle(get: { AppSettings.showSystemFiles }, set: { AppSettings.showSystemFiles = $0 })),
+                .card(
                     title: String(localized: "Show file extensions"), detail: nil, icon: "file-type",
                     control: .toggle(get: { AppSettings.showExtensions }, set: { AppSettings.showExtensions = $0 })),
                 .card(
@@ -148,6 +152,9 @@ enum SettingsContent {
                 .card(
                     title: String(localized: "Select on hover"), detail: String(localized: "Resting the pointer on an item for a moment selects it."), icon: "mouse-pointer",
                     control: .toggle(get: { AppSettings.selectOnHover }, set: { AppSettings.selectOnHover = $0 })),
+                .card(
+                    title: String(localized: "Show details on hover"), detail: String(localized: "The box with the size, the dates and a picture's dimensions when the pointer rests on an item."), icon: "info",
+                    control: .toggle(get: { AppSettings.hoverDetails }, set: { AppSettings.hoverDetails = $0 })),
                 .card(
                     title: String(localized: "Show thumbnails"), detail: String(localized: "Pictures of the files themselves in the Tiles layout."), icon: "image",
                     control: .toggle(get: { AppSettings.showThumbnails }, set: { AppSettings.showThumbnails = $0 })),
@@ -159,6 +166,13 @@ enum SettingsContent {
                         options: [("binary", String(localized: "Binary")), ("decimal", String(localized: "Decimal"))],
                         get: { AppSettings.decimalSizes ? "decimal" : "binary" },
                         set: { AppSettings.decimalSizes = $0 == "decimal" })),
+                .card(
+                    title: String(localized: "Folders in the command palette"),
+                    detail: String(localized: "⌘K also finds the folders you went to before; ⌘P lists only them."), icon: "clock",
+                    control: .toggle(get: { AppSettings.paletteFolderHistory }, set: { AppSettings.paletteFolderHistory = $0 })),
+                .card(
+                    title: String(localized: "Folder history"), detail: nil, icon: "eraser",
+                    control: .buttons([(String(localized: "Clear"), { FolderHistory.clear() })])),
             ] + fileBehaviourRows()
         case .tags:
             return tagRows()
@@ -166,8 +180,6 @@ enum SettingsContent {
             return fileTypeRows()
         case .actions:
             return shortcutRows()
-        case .dev:
-            return devRows()
         case .advanced:
             return advancedRows()
         case .speed:
@@ -176,12 +188,24 @@ enum SettingsContent {
             return organizerRows()
         case .ferry:
             return FerryPage.rows()
+        case .addons:
+            return AddonsPage.rows()
         case .about:
-            let info = Bundle.main.infoDictionary
-            let version = info?["CFBundleShortVersionString"] as? String ?? coreVersion()
             func open(_ s: String) -> () -> Void { { if let u = URL(string: s) { NSWorkspace.shared.open(u) } } }
             return [
-                .card(title: "rustyfiles", detail: String(localized: "A file manager that never freezes. Written in Rust."), icon: "info", control: .value(String(localized: "Version \(version)"))),
+                .card(title: "rustyfiles", detail: String(localized: "A file manager that never freezes. Written in Rust."), icon: "info", control: .value(String(localized: "Version \(Updater.version)"))),
+                .section(String(localized: "Updates")),
+                .card(
+                    title: Updater.summary, detail: nil, icon: "refresh-cw",
+                    control: .buttons(Updater.ready != nil
+                        ? [(String(localized: "Restart to update"), { Updater.restart() })]
+                        : [(String(localized: "Check for updates"), { Updater.check(manual: true) })])),
+                .card(
+                    title: String(localized: "Download updates by themselves"), detail: String(localized: "Looks soon after start and every two hours; a new version installs when rustyfiles restarts."), icon: "download",
+                    control: .toggle(get: { AppSettings.autoUpdate }, set: { AppSettings.autoUpdate = $0 })),
+                .card(
+                    title: String(localized: "Beta versions"), detail: String(localized: "Pre-releases arrive as updates too. A beta installed by hand takes the next betas anyway."), icon: "flask-conical",
+                    control: .toggle(get: { AppSettings.betaUpdates }, set: { AppSettings.betaUpdates = $0 })),
                 .section(String(localized: "Community")),
                 .card(
                     title: String(localized: "Links"), detail: nil, icon: "globe",
@@ -249,6 +273,17 @@ extension SettingsContent {
                 title: String(localized: "Always switch to a newly opened tab"), detail: nil, icon: "arrow-right-left",
                 control: .toggle(get: { AppSettings.switchToNewTab }, set: { AppSettings.switchToNewTab = $0 })),
             .card(
+                title: String(localized: "Open saved sessions in this window"),
+                detail: String(localized: "A session opened from the tab menu replaces this window's tabs instead of opening a new window (the closed tabs come back with ⇧⌘T)."),
+                icon: "save",
+                control: .toggle(get: { AppSettings.sessionsInThisWindow }, set: { AppSettings.sessionsInThisWindow = $0 })),
+            .card(
+                title: String(localized: "Type in the address bar of a new tab"), detail: String(localized: "⌘T and the + button: type or paste a path at once."), icon: "text-cursor-input",
+                control: .toggle(get: { AppSettings.newTabAddress }, set: { AppSettings.newTabAddress = $0 })),
+            .card(
+                title: String(localized: "The folder's path on tabs"), detail: String(localized: "Tabs show the folder's whole path in smaller text instead of its name; what doesn't fit is cut at the end."), icon: "folder-open",
+                control: .toggle(get: { AppSettings.tabPath }, set: { AppSettings.tabPath = $0 })),
+            .card(
                 title: String(localized: "Folders opened from other apps open in a new window"),
                 detail: String(localized: "Off: they open as a tab in the front window."), icon: "app-window",
                 control: .toggle(get: { AppSettings.externalInNewWindow }, set: { AppSettings.externalInNewWindow = $0 })),
@@ -302,6 +337,16 @@ extension SettingsContent {
             .card(
                 title: String(localized: "Open archives like folders"), detail: String(localized: "Off: archives open in the app macOS chooses for them."), icon: "archive",
                 control: .toggle(get: { AppSettings.archivesAsFolders }, set: { AppSettings.archivesAsFolders = $0 })),
+            .card(
+                title: String(localized: "Compress in one click"), detail: String(localized: "The right-click menu’s Compress makes this format at once; the other formats and “Create archive…” stay below it."), icon: "file-archive",
+                control: .choice(
+                    options: [("menu", String(localized: "Off: only the menu"))] + ArchiveKinds.offered.map { ($0.key, $0.title) },
+                    get: { AppSettings.quickCompress }, set: { AppSettings.quickCompress = $0 })),
+            .card(
+                title: String(localized: "Where archives open"), detail: nil, icon: "folder-open",
+                control: .choice(
+                    options: [("here", String(localized: "In the same tab")), ("tab", String(localized: "In a new tab")), ("window", String(localized: "In a new window"))],
+                    get: { AppSettings.archivesOpenIn }, set: { AppSettings.archivesOpenIn = $0 })),
             .card(
                 title: String(localized: "Open the folder after extracting"), detail: String(localized: "The new folder opens in a new tab."), icon: "folder-output",
                 control: .toggle(get: { AppSettings.openAfterExtract }, set: { AppSettings.openAfterExtract = $0 })),
@@ -718,6 +763,20 @@ final class SettingsCardView: FlippedView {
         if let control { addSubview(control) }
     }
 
+    /// A search result: a click outside its control opens its page there (issue 126).
+    var onOpen: (() -> Void)?
+    /// Marked for a moment after a search result was picked for it.
+    var marked = false { didSet { needsDisplay = true } }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let onOpen, event.clickCount == 1 else { return super.mouseUp(with: event) }
+        onOpen()
+    }
+
+    override func resetCursorRects() {
+        if onOpen != nil { addCursorRect(bounds, cursor: .pointingHand) }
+    }
+
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
 
@@ -751,7 +810,11 @@ final class SettingsCardView: FlippedView {
         let path = NSBezierPath(roundedRect: r, xRadius: Metrics.radius, yRadius: Metrics.radius)
         p.hover.setFill()
         path.fill()
-        p.border.setStroke()
+        if marked {
+            p.accent.withAlphaComponent(0.18).setFill()
+            path.fill()
+        }
+        (marked ? p.accent : p.border).setStroke()
         path.stroke()
         if let icon {
             Draw.icon(icon, in: NSRect(x: 16, y: 0, width: 18, height: bounds.height), size: 18, color: p.text)
@@ -948,13 +1011,23 @@ final class SettingsView: FlippedView, NSTextFieldDelegate {
         rows.forEach { $0.1.removeFromSuperview() }
         rows = []
         refreshers = []
-        let source: [SettingsRow]
+        var source: [SettingsRow] = []
+        // in a search, which page each result is on (a click there opens it)
+        var pages: [SettingsPage?] = []
         if query.isEmpty {
             source = SettingsContent.rows(page)
+            pages = source.map { _ in nil }
         } else {
-            source = SettingsPage.allCases.flatMap { SettingsContent.rows($0) }.filter { $0.searchText.contains(query) }
+            for pg in SettingsPage.allCases {
+                let found = SettingsContent.rows(pg).filter { $0.searchText.contains(query) }
+                guard !found.isEmpty else { continue }
+                source.append(.section(pg.title))
+                pages.append(nil)
+                source += found
+                pages += found.map { _ in pg }
+            }
         }
-        for row in source {
+        for (row, resultPage) in zip(source, pages) {
             let v: NSView
             switch row {
             case .section(let title): v = SectionHeader(title)
@@ -966,6 +1039,7 @@ final class SettingsView: FlippedView, NSTextFieldDelegate {
                     update()
                     refreshers.append(update)
                 }
+                if let resultPage { card.onOpen = { [weak self] in self?.reveal(title, on: resultPage) } }
                 v = card
             case .list(let title, let detail, let icon, let entries, let empty, let remove, let buttons):
                 v = SettingsListCard(
@@ -986,6 +1060,20 @@ final class SettingsView: FlippedView, NSTextFieldDelegate {
             rows.append((.section(""), none))
         }
         needsLayout = true
+    }
+
+    /// A picked search result: its page, scrolled so the setting stands near the top, marked
+    /// for a moment.
+    func reveal(_ title: String, on p: SettingsPage) {
+        window?.makeFirstResponder(nil)
+        show(p)
+        layoutSubtreeIfNeeded()
+        guard let card = rows.lazy.compactMap({ $0.1 as? SettingsCardView }).first(where: { $0.title == title }) else { return }
+        let maxY = max(content.frame.height - scroll.contentSize.height, 0)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: min(max(card.frame.minY - 24, 0), maxY)))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        card.marked = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.6) { [weak card] in card?.marked = false }
     }
 
     private func make(_ c: SettingsControl) -> NSView {

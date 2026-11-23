@@ -93,7 +93,8 @@ pub fn update(anchor: Option<Anchor>, cx: &mut App) {
             let same = h.shown_for.as_ref() == Some(&a);
             host_g(cx).anchor = Some(a);
             if !same {
-                show_now(open, Instant::now(), cx);
+                // (after the caller's update: showing reads the right island, which may be the one being updated, issue 193)
+                cx.defer(move |cx| show_now(open, Instant::now(), cx));
             }
         }
         _ => dismiss(cx),
@@ -264,6 +265,14 @@ fn show_now(key: IconKey, started: Instant, cx: &mut App) {
     };
     // show without activating (never brought to the front: the program in front keeps the keyboard), then the glass
     cx.spawn(async move |cx| {
+        // The new text is drawn first, then the window is shown: shown at once, it came up for a frame with the previous tip's text
+        // and size and then changed (issue 147: the drawer's tips were "redrawing twice"). One frame's wait.
+        let _ = handle.update(cx, |_, window, _| window.refresh());
+        cx.background_executor().timer(Duration::from_millis(17)).await;
+        // (closed or swapped meanwhile: nothing is shown)
+        if cx.update(|cx| cx.try_global::<TipHost>().is_none_or(|h| h.generation != generation)) {
+            return;
+        }
         rf_win::window::set_dark_mode(hwnd, dark);
         geo::show_at(hwnd, rect);
         cx.update(|cx| {

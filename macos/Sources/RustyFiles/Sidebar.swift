@@ -6,7 +6,7 @@ import AppKit
 /// background of its own: the window's glass shows.
 @MainActor
 final class SidebarView: FlippedView {
-    enum Kind { case home, place, pinned, drive, tag, tree, trash, settings, header }
+    enum Kind { case home, place, pinned, cloud, drive, tag, tree, trash, settings, header }
 
     struct Item {
         let kind: Kind
@@ -19,6 +19,9 @@ final class SidebarView: FlippedView {
         var depth = 0
         var expandable = false
         var expanded = false
+        /// A drive: how full it is (0…1) and "used / total", for its bar.
+        var used: Double? = nil
+        var space: String? = nil
     }
 
     /// The folder tree's open folders (paths), kept across starts.
@@ -78,6 +81,7 @@ final class SidebarView: FlippedView {
     var onEject: ((URL) -> Void)?
     var onOpenInNewTab: ((URL) -> Void)?
     var onOpenInNewWindow: ((URL) -> Void)?
+    var onDiskUsage: ((URL) -> Void)?
     var selectedURL: URL? {
         didSet {
             if let u = selectedURL, u != oldValue { follow(u) }
@@ -121,7 +125,7 @@ final class SidebarView: FlippedView {
     }
 
     @objc private func settingsChanged(_ note: Notification) {
-        if ["sidebarHidden", "sidebarTree", "tagList"].contains(AppSettings.changedKey(note)) { reload() }
+        if ["sidebarHidden", "sidebarTree", "tagList", "hiddenPlaces", "sidebarDriveSpace"].contains(AppSettings.changedKey(note)) { reload() }
     }
 
     @available(*, unavailable)
@@ -134,8 +138,10 @@ final class SidebarView: FlippedView {
         var items: [Item] = [Item(kind: .home, title: String(localized: "Home"), icon: "house", url: BrowserTab.homeURL)]
         // under Home, the two folders a Mac user goes to that Finder's sidebar hides or buries
         if AppSettings.showsSection(.libraries) {
-            items.append(Item(kind: .place, title: fm.displayName(atPath: "/Applications"), icon: "app-window-mac", url: URL(fileURLWithPath: "/Applications")))
-            if let lib = fm.urls(for: .libraryDirectory, in: .userDomainMask).first {
+            if !AppSettings.hidesPlace(URL(fileURLWithPath: "/Applications")) {
+                items.append(Item(kind: .place, title: fm.displayName(atPath: "/Applications"), icon: "app-window-mac", url: URL(fileURLWithPath: "/Applications")))
+            }
+            if let lib = fm.urls(for: .libraryDirectory, in: .userDomainMask).first, !AppSettings.hidesPlace(lib) {
                 items.append(Item(kind: .place, title: String(localized: "Library"), icon: "library", url: lib))
             }
         }
@@ -145,14 +151,29 @@ final class SidebarView: FlippedView {
                 items.append(Item(kind: .pinned, title: fm.displayName(atPath: url.path), icon: "folder", url: url))
             }
         }
-        let keys: [URLResourceKey] = [.volumeLocalizedNameKey, .volumeIsLocalKey]
+        // iCloud Drive and the File Provider folders (Dropbox, Google Drive, OneDrive, Box…)
+        if AppSettings.showsSection(.cloud) {
+            let clouds = Self.cloudPlaces()
+            if !clouds.isEmpty {
+                items.append(Item(kind: .header, title: String(localized: "Cloud"), icon: "", url: nil))
+                items += clouds.map { Item(kind: .cloud, title: $0.title, icon: "cloud", url: $0.url) }
+            }
+        }
+        let keys: [URLResourceKey] = [.volumeLocalizedNameKey, .volumeIsLocalKey, .volumeTotalCapacityKey, .volumeAvailableCapacityKey]
         let volumes = fm.mountedVolumeURLs(includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
         if !volumes.isEmpty, AppSettings.showsSection(.drives) {
             items.append(Item(kind: .header, title: String(localized: "Drives"), icon: "", url: nil))
-            for v in volumes {
+            for v in volumes where !AppSettings.hidesPlace(v) {
                 let values = try? v.resourceValues(forKeys: Set(keys))
                 let icon = values?.volumeIsLocal == false ? "server" : "hard-drive"
-                items.append(Item(kind: .drive, title: values?.volumeLocalizedName ?? v.lastPathComponent, icon: icon, url: v))
+                var item = Item(kind: .drive, title: values?.volumeLocalizedName ?? v.lastPathComponent, icon: icon, url: v)
+                // a usage bar under the name (red above 90 %); a server that does not answer gets none
+                if values?.volumeIsLocal != false, let total = values?.volumeTotalCapacity, total > 0, let free = values?.volumeAvailableCapacity {
+                    let used = max(total - free, 0)
+                    item.used = Double(used) / Double(total)
+                    item.space = "\(formatSize(bytes: UInt64(used))) / \(formatSize(bytes: UInt64(total)))"
+                }
+                items.append(item)
             }
         }
         // the folder tree (Settings › Appearance › Sidebar sections)
@@ -172,6 +193,27 @@ final class SidebarView: FlippedView {
         items.append(Item(kind: .trash, title: String(localized: "Trash"), icon: "trash", url: fm.homeDirectoryForCurrentUser.appendingPathComponent(".Trash")))
         list.items = items
         needsLayout = true
+    }
+
+    /// The cloud folders this Mac syncs: iCloud Drive, then each File Provider root under
+    /// ~/Library/CloudStorage by its provider's name (the account added when one has several).
+    static func cloudPlaces() -> [(title: String, url: URL)] {
+        let fm = FileManager.default
+        let lib = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library")
+        var out: [(String, URL)] = []
+        let icloud = lib.appendingPathComponent("Mobile Documents/com~apple~CloudDocs")
+        if fm.fileExists(atPath: icloud.path) { out.append(("iCloud Drive", icloud)) }
+        let roots = ((try? fm.contentsOfDirectory(at: lib.appendingPathComponent("CloudStorage"), includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? [])
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        let names: [String: String] = ["GoogleDrive": "Google Drive", "OneDrive": "OneDrive", "Dropbox": "Dropbox", "Box": "Box", "pCloudDrive": "pCloud Drive"]
+        let providers = roots.map { $0.lastPathComponent.split(separator: "-", maxSplits: 1).map(String.init) }
+        for (url, parts) in zip(roots, providers) {
+            let provider = names[parts[0]] ?? parts[0]
+            let several = providers.filter { $0[0] == parts[0] }.count > 1
+            let title = several && parts.count > 1 ? "\(provider) (\(parts[1]))" : provider
+            out.append((title, url))
+        }
+        return out.filter { !AppSettings.hidesPlace($0.1) }
     }
 
     override func layout() {
@@ -210,7 +252,9 @@ final class SidebarListView: HoverView {
     private func rects() -> [NSRect] {
         var y: CGFloat = 4
         return items.map { item in
-            let h: CGFloat = item.kind == .header ? 12 + 16 + 4 : 32
+            var h: CGFloat = item.kind == .header ? 12 + 16 + 4 : 32
+            // a drive's bar, and its numbers under it (Settings › Show drive space in numbers)
+            if item.used != nil { h = AppSettings.sidebarDriveSpace ? 54 : 38 }
             let r = NSRect(x: 8, y: y, width: bounds.width - 16, height: h)
             y += h + 2
             return r
@@ -311,7 +355,7 @@ final class SidebarListView: HoverView {
                 Draw.roundedRect(r, radius: Metrics.radiusSmall, fill: p.hover)
             }
             // px_2, icon 16, gap_2, text_sm
-            let iconColor: NSColor = (item.kind == .home || item.kind == .place || item.kind == .pinned) ? p.accent : p.textSecondary
+            let iconColor: NSColor = (item.kind == .home || item.kind == .place || item.kind == .pinned || item.kind == .cloud) ? p.accent : p.textSecondary
             if item.kind == .tag {
                 let dot = NSRect(x: r.minX + 8 + 2, y: r.midY - 6, width: 12, height: 12)
                 if let c = item.color {
@@ -332,6 +376,18 @@ final class SidebarListView: HoverView {
                 continue
             } else {
                 Draw.icon(item.icon, in: NSRect(x: r.minX + 8, y: r.minY, width: 16, height: r.height), size: 16, color: iconColor)
+            }
+            if let used = item.used {
+                // the name, a 2 px bar 5 under it, the numbers 2 under that (workspace.rs sidebar drives)
+                let x = r.minX + 8 + 16 + 8, w = r.width - 40
+                Draw.text(item.title, in: NSRect(x: x, y: r.minY + 6, width: w, height: 20), font: Metrics.textSm, color: p.text)
+                let bar = NSRect(x: x, y: r.minY + 6 + 20 + 3, width: w, height: 2)
+                Draw.roundedRect(bar, radius: 1, fill: p.pressed)
+                Draw.roundedRect(NSRect(x: bar.minX, y: bar.minY, width: bar.width * CGFloat(min(max(used, 0), 1)), height: 2), radius: 1, fill: used > 0.9 ? p.danger : p.accent)
+                if AppSettings.sidebarDriveSpace, let space = item.space {
+                    Draw.text(space, in: NSRect(x: x, y: bar.maxY + 2, width: w, height: 16), font: Metrics.textXs, color: p.textTertiary)
+                }
+                continue
             }
             Draw.text(item.title, in: NSRect(x: r.minX + 8 + 16 + 8, y: r.minY, width: r.width - 40, height: r.height), font: Metrics.textSm, color: p.text)
         }
@@ -376,6 +432,12 @@ final class SidebarListView: HoverView {
         b.add(String(localized: "Copy path"), "clipboard-copy") { MenuActions.copyPaths([url]) }
         b.add(String(localized: "Open in Terminal"), "square-terminal") { MenuActions.openInTerminal(url) }
         b.add(String(localized: "Properties"), "wrench", key: "i") { PropertiesWindow.show([url]) }
+        b.add(String(localized: "Disk usage"), "chart-pie") { owner.onDiskUsage?(url) }
+        // a cloud folder, a drive, Applications or Library can be hidden on its own (issue 141)
+        if [.cloud, .drive, .place].contains(item.kind) {
+            b.separator()
+            b.add(String(localized: "Hide this place"), "eye-off") { AppSettings.hiddenPlaces.append(url.standardizedFileURL.path) }
+        }
         if item.kind == .drive {
             let values = try? url.resourceValues(forKeys: [.volumeIsEjectableKey, .volumeIsRemovableKey, .volumeIsLocalKey, .volumeIsInternalKey])
             let ejectable = values?.volumeIsEjectable == true || values?.volumeIsRemovable == true || values?.volumeIsLocal == false

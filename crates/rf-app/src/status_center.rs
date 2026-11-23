@@ -42,6 +42,8 @@ pub struct OpState {
     started: Instant,
     /// A button on the finished operation (the folder organizer's "Geri al"), see [`set_result`].
     action: Option<ResultAction>,
+    /// The button is there while the operation runs too ("İzle" on a video being downloaded), see [`set_live_action`].
+    live: bool,
     /// When it ended (for how long its card stays).
     ended: Option<Instant>,
     /// Speed, time left and the pace chart, fed from the progress reports.
@@ -92,6 +94,7 @@ impl OpState {
             paused,
             started: Instant::now(),
             action: None,
+            live: false,
             ended: None,
             stats: OpStats::default(),
             bytes,
@@ -747,6 +750,18 @@ pub fn set_result(cx: &mut App, id: u64, title: Option<String>, action: Option<R
     });
 }
 
+/// A button on a running operation that stays when it ends ("İzle": play a video while it downloads).
+pub fn set_live_action(cx: &mut App, id: u64, action: ResultAction) {
+    let Some(entity) = cx.try_global::<OpsGlobal>().map(|g| g.0.clone()) else { return };
+    entity.update(cx, |ops, cx| {
+        if let Some(op) = ops.ops.iter_mut().find(|o| o.id == id) {
+            op.action = Some(action);
+            op.live = true;
+        }
+        cx.notify();
+    });
+}
+
 /// Takes a finished operation off the list (an automatic run that found nothing to do should
 /// not leave a row behind).
 pub fn remove(cx: &mut App, id: u64) {
@@ -815,6 +830,39 @@ pub fn paste_virtual(cx: &mut App, dest: std::path::PathBuf, after: impl FnOnce(
 }
 
 /// `record = false` for undo/redo replays (they must not land on the undo stack again).
+/// The folders copies and moves are writing into right now, with when each began (see [`still_arriving`]).
+static ARRIVING: std::sync::Mutex<Vec<(u64, std::path::PathBuf, std::time::SystemTime)>> = std::sync::Mutex::new(Vec::new());
+static ARRIVING_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Holds a destination in [`ARRIVING`] for as long as its transfer runs.
+struct Arriving(u64);
+impl Arriving {
+    fn begin(dest: &std::path::Path) -> Self {
+        let id = ARRIVING_NEXT.fetch_add(1, Ordering::Relaxed);
+        ARRIVING.lock().unwrap().push((id, dest.to_path_buf(), std::time::SystemTime::now()));
+        Arriving(id)
+    }
+}
+impl Drop for Arriving {
+    fn drop(&mut self) {
+        ARRIVING.lock().unwrap().retain(|(id, _, _)| *id != self.0);
+    }
+}
+
+/// Whether `item` is still being written by a copy or move that runs now: it sits directly in that transfer's destination and was
+/// made after the transfer began. Renaming it then would leave the transfer writing under the old name, which it makes again
+/// (issue 297: "x - Copy" came back with the files going on into it).
+pub fn still_arriving(item: &std::path::Path) -> bool {
+    let Some(parent) = item.parent() else { return false };
+    let jobs: Vec<std::time::SystemTime> = ARRIVING.lock().unwrap().iter().filter(|(_, d, _)| d.as_path() == parent).map(|(_, _, t)| *t).collect();
+    if jobs.is_empty() {
+        return false;
+    }
+    // (a second of slack: the file system keeps the creation time coarser than the clock)
+    let made = std::fs::metadata(item).and_then(|m| m.created()).ok();
+    made.is_some_and(|m| jobs.iter().any(|t| m + std::time::Duration::from_secs(1) >= *t))
+}
+
 pub fn transfer_ex(cx: &mut App, kind: Transfer, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, record: bool) {
     transfer_inner(cx, kind, sources, dest, record, None);
 }
@@ -833,13 +881,36 @@ fn transfer_inner(
         crate::archive_view::add_into(cx, archive, inner, sources);
         return;
     }
+    // onto an FTP server: the server's own upload, folders with all they hold (Windows' FTP folder cannot be reached through its
+    // engine, issue 223); a move deletes the local items once they are all up
+    if rf_win::ftp::is_ftp(&dest) {
+        let url = dest.to_string_lossy().replace('\\', "/");
+        let title = format!("{}: {} → {}", t!("Kopyalanıyor"), named(&sources), short(&dest));
+        let on_done: Option<OnDone> = after.map(|f| -> OnDone { Box::new(move |_, cx: &mut App| f(Vec::new(), cx)) });
+        start_with(
+            cx,
+            title,
+            move |_| {
+                for s in &sources {
+                    rf_win::ftp::upload_tree(s, &url)?;
+                }
+                if kind == Transfer::Move {
+                    fileops::delete(&sources, false)?;
+                }
+                Ok(true)
+            },
+            on_done,
+        );
+        return;
+    }
     let verb = match kind {
         Transfer::Copy => t!("Kopyalanıyor"),
         Transfer::Move => t!("Taşınıyor"),
     };
-    let title = format!("{verb}: {} → {}", crate::i18n::items(sources.len()), short(&dest));
+    let title = format!("{verb}: {} → {}", named(&sources), short(&dest));
     let s = cx.global::<crate::settings::Settings>();
     let (fast, verify, limit) = (s.fast_file_ops, s.copy_verify.engine(), u64::from(s.copy_speed_limit) << 20);
+    rf_win::fastcopy::DROP_WSL_ZONE.store(s.wsl_drop_zone, std::sync::atomic::Ordering::Relaxed);
     let arrived = Arc::new(std::sync::Mutex::new(Vec::<std::path::PathBuf>::new()));
     let landed = arrived.clone();
     let top = dest.clone();
@@ -849,16 +920,18 @@ fn transfer_inner(
         Transfer::Copy => t!("{items} kopyalanıyor: {dest}"),
         Transfer::Move => t!("{items} taşınıyor: {dest}"),
     }
-    .replace("{items}", &crate::i18n::items(sources.len()))
+    .replace("{items}", &named(&sources))
     .replace("{dest}", &short(&dest));
     let open_dest = dest.clone();
     let mark = Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
     let marker = mark.clone();
     let id = start_with_id(cx, title, move |t| {
+        let _arriving = Arriving::begin(&dest);
         t.set_verify(verify);
         t.limit.store(limit, Ordering::Relaxed);
         // our engine (conflicts asked in one list); Windows' engine when it is turned off
-        let r = if fast {
+        // (a phone's folder or an FTP server on either side: only Windows' engine reaches them)
+        let r = if fast && !is_shell_name(&dest) && !sources.iter().any(|s| is_shell_name(s)) {
             rf_win::fastcopy::transfer(kind, &sources, &dest, t.clone())
         } else {
             fileops::transfer_tracked(kind, &sources, &dest, t.clone())
@@ -923,7 +996,7 @@ fn ask_resume(job: rf_win::fastcopy::Interrupted, window: &mut gpui_kit::Window,
         Transfer::Copy => t!("Yarıda kalan bir kopyalama var"),
         Transfer::Move => t!("Yarıda kalan bir taşıma var"),
     };
-    let what = format!("{} → {}", crate::i18n::items(job.sources.len()), short(&job.dest));
+    let what = format!("{} → {}", named(&job.sources), short(&job.dest));
     let msg = format!(
         "{what}\n{} / {} {}\n\n{}",
         job.done.min(job.files),
@@ -961,7 +1034,7 @@ pub fn resume_job(cx: &mut App, job: rf_win::fastcopy::Interrupted) {
         Transfer::Copy => t!("Kopyalanıyor"),
         Transfer::Move => t!("Taşınıyor"),
     };
-    let title = format!("{verb}: {} → {}", crate::i18n::items(job.sources.len()), short(&job.dest));
+    let title = format!("{verb}: {} → {}", named(&job.sources), short(&job.dest));
     let limit = u64::from(cx.global::<crate::settings::Settings>().copy_speed_limit) << 20;
     start(cx, title, move |t| {
         t.limit.store(limit, Ordering::Relaxed);
@@ -1128,7 +1201,7 @@ fn extract_now(cx: &mut App, archive: std::path::PathBuf, to: ExtractTo) {
 
 /// Creates an archive with options: a password, a 7z dictionary size, parts of a given size.
 pub fn compress_opts(cx: &mut App, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, format: rf_archive::Format, level: u32, opts: rf_archive::CompressOptions) {
-    let title = format!("{} {} → {}", t!("Sıkıştırılıyor:"), crate::i18n::items(sources.len()), short(&dest));
+    let title = format!("{} {} → {}", t!("Sıkıştırılıyor:"), named(&sources), short(&dest));
     start(cx, title, move |t| {
         let cancel = t.cancel.clone();
         let mut prog = archive_progress(&t);
@@ -1142,7 +1215,7 @@ pub fn compress_opts(cx: &mut App, sources: Vec<std::path::PathBuf>, dest: std::
 
 /// RAR through WinRAR's Rar.exe (`level` 0…9).
 pub fn compress_rar(cx: &mut App, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, level: u32, password: Option<String>) {
-    let title = format!("{} {} → {}", t!("Sıkıştırılıyor:"), crate::i18n::items(sources.len()), short(&dest));
+    let title = format!("{} {} → {}", t!("Sıkıştırılıyor:"), named(&sources), short(&dest));
     start(cx, title, move |t| {
         let cancel = t.cancel.clone();
         let mut prog = archive_progress(&t);
@@ -1160,7 +1233,7 @@ pub fn compress(cx: &mut App, sources: Vec<std::path::PathBuf>, dest: std::path:
 
 /// `level`: 0 store … 9 smallest.
 pub fn compress_level(cx: &mut App, sources: Vec<std::path::PathBuf>, dest: std::path::PathBuf, format: rf_archive::Format, level: u32) {
-    let title = format!("{} {} → {}", t!("Sıkıştırılıyor:"), crate::i18n::items(sources.len()), short(&dest));
+    let title = format!("{} {} → {}", t!("Sıkıştırılıyor:"), named(&sources), short(&dest));
     start(cx, title, move |t| {
         let cancel = t.cancel.clone();
         let mut prog = archive_progress(&t);
@@ -1172,19 +1245,62 @@ pub fn compress_level(cx: &mut App, sources: Vec<std::path::PathBuf>, dest: std:
     });
 }
 
+/// A place only Windows' own engine reaches: an item of a shell folder (a phone's, `::{...}`) or of an FTP server.
+fn is_shell_name(p: &std::path::Path) -> bool {
+    p.to_string_lossy().starts_with("::") || rf_win::ftp::is_ftp(p)
+}
+
+/// Items of a shell folder (a phone's) deleted for good by Windows' engine (the device has no recycle bin), then `after`.
+pub fn delete_in_shell(cx: &mut App, paths: Vec<std::path::PathBuf>, after: impl FnOnce(&mut App) + 'static) {
+    let title = format!("{} {}", t!("Kalıcı olarak siliniyor:"), named(&paths));
+    start_with_id(cx, title, move |t| fileops::delete_tracked(&paths, true, t), Some(Box::new(move |_, cx| after(cx))));
+}
+
 pub fn delete(cx: &mut App, paths: Vec<std::path::PathBuf>, permanent: bool) {
     delete_ex(cx, paths, permanent, true)
 }
 
+/// What an operation works on, by name: the one item's name, or the first item's name and how many more ("photo1.jpg + 4 more").
+/// The cards said "1 item" or "5 items", which did not tell one running operation from another, nor what had just been deleted
+/// (issue 296). A long name is cut in its middle, so that its beginning and its extension stay.
+fn named(paths: &[std::path::PathBuf]) -> String {
+    let Some(first) = paths.first() else { return crate::i18n::items(0) };
+    let name = short_name(&rf_core::history::display_name(first), 44);
+    match paths.len() - 1 {
+        0 => name,
+        more => t!("{name} ve {n} öğe daha").replace("{name}", &name).replace("{n}", &more.to_string()),
+    }
+}
+
+/// `name` in at most `most` characters: its beginning, an ellipsis, its end.
+fn short_name(name: &str, most: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= most {
+        return name.to_string();
+    }
+    let tail = most / 3;
+    let head = most - tail - 1;
+    chars[..head].iter().chain(std::iter::once(&'…')).chain(chars[chars.len() - tail..].iter()).collect()
+}
+
 pub fn delete_ex(cx: &mut App, paths: Vec<std::path::PathBuf>, permanent: bool, record: bool) {
+    delete_inner(cx, paths, permanent, record, None);
+}
+
+/// [`delete`], then `after` once the deletion is over (a folder nothing watches is read again: a WSL distribution's).
+pub fn delete_then(cx: &mut App, paths: Vec<std::path::PathBuf>, permanent: bool, after: impl FnOnce(&mut App) + 'static) {
+    delete_inner(cx, paths, permanent, true, Some(Box::new(move |_, cx: &mut App| after(cx))));
+}
+
+fn delete_inner(cx: &mut App, paths: Vec<std::path::PathBuf>, permanent: bool, record: bool, on_done: Option<OnDone>) {
     // a pinned folder that is deleted leaves the sidebar (its question was answered before this)
     for p in &paths {
         crate::places::pins_follow(cx, p, None);
     }
     let title = if permanent {
-        format!("{} {}", t!("Kalıcı olarak siliniyor:"), crate::i18n::items(paths.len()))
+        format!("{} {}", t!("Kalıcı olarak siliniyor:"), named(&paths))
     } else {
-        format!("{} {}", t!("Geri dönüşüm kutusuna taşınıyor:"), crate::i18n::items(paths.len()))
+        format!("{} {}", t!("Geri dönüşüm kutusuna taşınıyor:"), named(&paths))
     };
     let fast = cx.global::<crate::settings::Settings>().fast_file_ops;
     let mark = Arc::new(std::sync::Mutex::new(None::<std::path::PathBuf>));
@@ -1202,7 +1318,7 @@ pub fn delete_ex(cx: &mut App, paths: Vec<std::path::PathBuf>, permanent: bool, 
             crate::undo::push(crate::undo::UndoOp::Recycled { pairs });
         }
         r
-    }, None);
+    }, on_done);
     if record && !permanent {
         set_extras(cx, id, None, None, Some(mark));
     }
@@ -1457,7 +1573,8 @@ fn render_op(ops: &Entity<Ops>, op: &OpState, p: &Palette) -> AnyElement {
                 .min_w_0()
                 .gap_1()
                 .child(div().text_sm().overflow_hidden().text_ellipsis().whitespace_nowrap().child(op.title.clone()))
-                .when(running, |d| {
+                .when_some(running.then(|| crate::downloads_view::card_bar(op.id, &p)).flatten(), |d, bar| d.child(bar))
+                .when(running && crate::downloads_view::card_bar(op.id, &p).is_none(), |d| {
                     d.child(
                         div()
                             .h(px(3.))
@@ -1477,7 +1594,7 @@ fn render_op(ops: &Entity<Ops>, op: &OpState, p: &Palette) -> AnyElement {
                         .children(op.current.clone().filter(|_| running).map(|c| {
                             div().flex_1().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().child(c)
                         }))
-                        .children(op.action.as_ref().filter(|_| !running).map(|(label, run)| {
+                        .children(op.action.as_ref().filter(|_| !running || op.live).map(|(label, run)| {
                             let run = run.clone();
                             div()
                                 .id(("op-act", op.id as usize))
@@ -1571,6 +1688,38 @@ mod tests {
     use rf_core::transfer::{self as xfer, Stage};
     use rf_win::fastcopy::Resolve;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn an_operation_is_named_by_its_item_and_a_long_name_keeps_both_ends() {
+        use std::path::PathBuf;
+        assert_eq!(super::named(&[PathBuf::from("C:/x/archive.zip")]), "archive.zip");
+        let five: Vec<PathBuf> = (1..=5).map(|i| PathBuf::from(format!("C:/x/photo{i}.jpg"))).collect();
+        let said = super::named(&five);
+        assert!(said.starts_with("photo1.jpg") && said.contains('4'), "{said}");
+        let long = super::short_name("a-very-long-name-that-goes-on-and-on-and-on-for-ever-and-a-day.tar.gz", 44);
+        assert_eq!(long.chars().count(), 44);
+        assert!(long.starts_with("a-very-long-name") && long.ends_with(".tar.gz") && long.contains('…'), "{long}");
+        assert_eq!(super::short_name("kısa.txt", 44), "kısa.txt");
+    }
+
+    #[test]
+    fn an_item_a_running_copy_makes_is_still_arriving_and_older_ones_are_not() {
+        let dir = std::env::temp_dir().join(format!("rf-arriving-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old.txt");
+        std::fs::write(&old, b"x").unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        let job = super::Arriving::begin(&dir);
+        let new = dir.join("x - Copy");
+        std::fs::create_dir(&new).unwrap();
+        assert!(super::still_arriving(&new), "made by the running copy");
+        assert!(!super::still_arriving(&old), "there before the copy began");
+        assert!(!super::still_arriving(&std::env::temp_dir().join("elsewhere")), "not in the destination");
+        drop(job);
+        assert!(!super::still_arriving(&new), "the copy is over");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn op(id: u64, title: &str, phase: OpPhase, done: u32, total: u32) -> OpState {
         OpState { total, done, phase, ..OpState::new(id, title.into(), Default::default(), Default::default(), Default::default()) }
@@ -1866,10 +2015,11 @@ pub fn sync_popup(ops: &Entity<Ops>, cx: &mut App) {
 
 fn open_popup(ops: &Entity<Ops>, owner: AnyWindowHandle, cx: &mut App) -> Option<AnyWindowHandle> {
     // anchored under the title-bar button: right edge 8 px in from the window's
+    let explorer_style = cx.global::<crate::settings::Settings>().windows_file_explorer_theme;
     let (origin, width, dark, display) = owner
         .update(cx, |_, w, cx| (w.bounds().origin, w.viewport_size().width, Palette::for_window(w).dark, crate::theme::popup_display(w, cx)))
         .ok()?;
-    let top = theme::TITLEBAR_H + px(44.);
+    let top = theme::titlebar_h() + px(theme::address_row_h(false) - 4.);
     let x = origin.x + width - px(8. + FLYOUT_W);
     let bounds = Bounds::new(point(x, origin.y + top), size(px(FLYOUT_W), px(120.)));
     let opts = WindowOptions {
@@ -1882,7 +2032,11 @@ fn open_popup(ops: &Entity<Ops>, owner: AnyWindowHandle, cx: &mut App) -> Option
         is_movable: false,
         is_resizable: false,
         is_minimizable: false,
-        window_background: crate::theme::window_material(WindowBackgroundAppearance::Blurred),
+        window_background: if explorer_style {
+            WindowBackgroundAppearance::Opaque
+        } else {
+            crate::theme::window_material(WindowBackgroundAppearance::Blurred)
+        },
         ..Default::default()
     };
     let ops = ops.clone();
@@ -1894,7 +2048,7 @@ fn open_popup(ops: &Entity<Ops>, owner: AnyWindowHandle, cx: &mut App) -> Option
                 crate::glass::keep_out_of_capture(h.hwnd.get());
             }
         }
-        cx.new(|cx| ScView::new(ops, w, cx))
+        cx.new(|cx| ScView::new(ops, explorer_style, w, cx))
     });
     match r {
         Ok(h) => Some(h.into()),
@@ -1908,12 +2062,13 @@ fn open_popup(ops: &Entity<Ops>, owner: AnyWindowHandle, cx: &mut App) -> Option
 /// The Status Center in its own Acrylic window; sizes itself to its content.
 struct ScView {
     ops: Entity<Ops>,
+    explorer_style: bool,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
 
 impl ScView {
-    fn new(ops: Entity<Ops>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(ops: Entity<Ops>, explorer_style: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let subs = vec![
             cx.observe(&ops, |_, _, cx| cx.notify()),
             // clicking anywhere else closes it, like a Windows 11 flyout
@@ -1935,7 +2090,7 @@ impl ScView {
         ];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Self { ops, focus, _subs: subs }
+        Self { ops, explorer_style, focus, _subs: subs }
     }
 }
 
@@ -1948,7 +2103,8 @@ impl Render for ScView {
         v_flex()
             .size_full()
             // (the Acrylic window is the surface; a Windows without it gets the plain fill)
-            .when_some(crate::theme::popup_fill(&p), |d, f| d.bg(f))
+            .when(self.explorer_style, |d| d.rounded(theme::RADIUS).bg(p.card_bg).border_1().border_color(p.border).shadow_lg())
+            .when(!self.explorer_style, |d| d.when_some(crate::theme::popup_fill(&p), |d, f| d.bg(f)))
             .track_focus(&self.focus)
             .text_color(p.text)
             .on_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {

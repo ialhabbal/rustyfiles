@@ -21,6 +21,16 @@ pub fn drive_name(d: &Drive) -> String {
     }
 }
 
+/// Freedesktop icon names for a drive, tried in order. Drives are locations, not folders.
+pub fn drive_icon_names(kind: DriveKind) -> &'static [&'static str] {
+    match kind {
+        DriveKind::Removable => &["drive-removable-media", "drive-harddisk-usb", "drive-harddisk"],
+        DriveKind::Network => &["network-server", "folder-remote"],
+        DriveKind::Optical => &["drive-optical", "drive-cdrom"],
+        DriveKind::Fixed | DriveKind::RamDisk | DriveKind::Unknown => &["drive-harddisk", "drive-harddisk-system"],
+    }
+}
+
 #[derive(Clone)]
 pub struct Pinned {
     pub title: String,
@@ -72,7 +82,8 @@ fn load_recent(limit: usize) -> Vec<Recent> {
 fn load_cloud_and_wsl() -> Vec<Pinned> {
     let mut out = Vec::new();
     let mut add = |title: String, path: PathBuf, icon: L| {
-        if path.is_dir() && !out.iter().any(|p: &Pinned| p.path == path) {
+        let same = |p: &Pinned| p.path.as_os_str().eq_ignore_ascii_case(path.as_os_str());
+        if path.is_dir() && !out.iter().any(same) {
             out.push(Pinned { title, path, icon });
         }
     };
@@ -99,6 +110,15 @@ fn load_cloud_and_wsl() -> Vec<Pinned> {
     for letter in ['G', 'H'] {
         add("Google Drive".into(), PathBuf::from(format!("{letter}:\\My Drive")), L::Cloud);
     }
+    // every other sync root Windows knows (issue 141: Proton Drive, pCloud, Nextcloud, Box, MEGA ...), as Explorer lists them; one
+    // that is already in the list above (OneDrive) stays as it is
+    for r in rf_win::syncroots::list() {
+        add(r.name, r.path, L::Cloud);
+    }
+    // and the folders a client pins to Explorer's navigation pane itself (MEGA's sync folders)
+    for r in rf_win::syncroots::pinned_folders() {
+        add(r.name, r.path, L::Cloud);
+    }
     // WSL distributions registered for this user
     if let Ok(lxss) = windows_registry::CURRENT_USER.open(r"Software\Microsoft\Windows\CurrentVersion\Lxss") {
         if let Ok(keys) = lxss.keys() {
@@ -120,30 +140,58 @@ pub struct Places {
     pub cloud: Vec<Pinned>,
     pub pinned: Vec<Pinned>,
     pub recent: Vec<Recent>,
+    /// Windows writes no recent items (switched off in its settings or by a policy): Home says so instead of an empty list.
+    pub recent_off: bool,
     pub libraries: Vec<rf_win::libraries::Library>,
     /// Network locations ("Add a network location" shortcuts): (name, target).
     pub network: Vec<(String, std::path::PathBuf)>,
     /// Devices under This PC that are not drives (MTP phones, cameras): browsed as shell
     /// folders.
     pub devices: Vec<rf_win::shellfolder::ShellChild>,
+    /// Whether the Windows Recycle Bin contains items; `None` until the shell has answered.
+    pub recycle_full: Option<bool>,
+    recycle_icon_hovered: bool,
     pub loaded: bool,
     /// The recent items and the cloud / WSL entries are in too (they come a little after `loaded`: see `refresh`).
     pub extras_loaded: bool,
     _task: Option<Task<()>>,
+    _recycle_task: Option<Task<()>>,
 }
 
 impl Places {
     pub fn new(cx: &mut Context<Self>) -> Self {
         let mut this =
-            Self { drives: Vec::new(), cloud: Vec::new(), pinned: Vec::new(), recent: Vec::new(), libraries: Vec::new(), network: Vec::new(), devices: Vec::new(), loaded: false, extras_loaded: false, _task: None };
+            Self {
+                drives: Vec::new(),
+                cloud: Vec::new(),
+                pinned: Vec::new(),
+                recent: Vec::new(),
+                recent_off: false,
+                libraries: Vec::new(),
+                network: Vec::new(),
+                devices: Vec::new(),
+                recycle_full: None,
+                recycle_icon_hovered: false,
+                loaded: false,
+                extras_loaded: false,
+                _task: None,
+                _recycle_task: None,
+            };
         this.refresh(cx);
         // the drives the user hides (Settings > Files and folders, a drive's own menu) leave and come back at once
         let mut hidden = rf_win::drives::hidden();
         // and the pins, when they change anywhere (a pinned folder deleted or renamed: `pins_follow`)
         let mut pins = cx.global::<crate::settings::Settings>().pinned.clone();
+        let mut recycle_theme = cx.global::<crate::settings::Settings>().windows_file_explorer_theme;
         cx.observe_global::<crate::settings::Settings>(move |p, cx| {
             let now = rf_win::drives::hidden();
-            let now_pins = cx.global::<crate::settings::Settings>().pinned.clone();
+            let settings = cx.global::<crate::settings::Settings>();
+            let now_pins = settings.pinned.clone();
+            let now_recycle_theme = settings.windows_file_explorer_theme;
+            if recycle_theme && !now_recycle_theme {
+                p.set_recycle_icon_hovered(false, cx);
+            }
+            recycle_theme = now_recycle_theme;
             if now != hidden || now_pins != pins {
                 hidden = now;
                 pins = now_pins;
@@ -170,6 +218,7 @@ impl Places {
         // thread, and the list is only replaced when it changed. Not while no window is in front
         // of the user (minimised, or another app active): enumerating This PC loads shell
         // extensions and can touch the drives; the look happens again when one comes back.
+        let mut misses: std::collections::HashMap<String, u8> = std::collections::HashMap::new();
         cx.spawn(async move |this, cx| loop {
             if !rf_win::window::app_in_front() {
                 cx.background_executor().timer(std::time::Duration::from_secs(5)).await;
@@ -181,6 +230,7 @@ impl Places {
             let found = cx.background_spawn(async move { rf_win::shellfolder::devices() }).await;
             let alive = this
                 .update(cx, |p, cx| {
+                    let found = steady_devices(&p.devices, found, &mut misses, DEVICE_MISSES);
                     if p.devices != found {
                         p.devices = found;
                         cx.notify();
@@ -194,6 +244,46 @@ impl Places {
         })
         .detach();
         this
+    }
+
+    pub fn set_recycle_icon_hovered(&mut self, hovered: bool, cx: &mut Context<Self>) {
+        if self.recycle_icon_hovered == hovered {
+            return;
+        }
+        self.recycle_icon_hovered = hovered;
+        if !hovered {
+            self._recycle_task = None;
+            return;
+        }
+
+        self._recycle_task = Some(cx.spawn(async move |this, cx| {
+            let mut error_logged = false;
+            loop {
+                match cx.background_spawn(async { rf_win::recycle::info() }).await {
+                    Ok((item_count, _)) => {
+                        error_logged = false;
+                        if this
+                            .update(cx, |places, cx| {
+                                let full = item_count > 0;
+                                if places.recycle_full != Some(full) {
+                                    places.recycle_full = Some(full);
+                                    cx.notify();
+                                }
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) if !error_logged => {
+                        log::warn!("could not read Recycle Bin state for its icon: {error:#}");
+                        error_logged = true;
+                    }
+                    Err(_) => {}
+                }
+                cx.background_executor().timer(std::time::Duration::from_secs(3)).await;
+            }
+        }));
     }
 
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
@@ -234,7 +324,7 @@ impl Places {
             // the localized names the jump list and the Home view show for these folders are read here, on this thread: the
             // drawing only looks in the cache (see rf_win::localized::label_if_known)
             rf_win::localized::warm(recent.iter().filter(|r| r.is_dir).flat_map(|r| crate::nav_touch::label_paths(&r.target)));
-            (recent, load_cloud_and_wsl())
+            (recent, rf_win::dock::startrecent::recent_tracking_on(), load_cloud_and_wsl())
         });
         self._task = Some(cx.spawn(async move |this, cx| {
             let (pinned, drives, libraries, network) = work.await;
@@ -250,9 +340,10 @@ impl Places {
                 p.loaded = true;
                 cx.notify();
             });
-            let (recent, cloud) = extras.await;
+            let (recent, tracking, cloud) = extras.await;
             let _ = this.update(cx, |p, cx| {
                 p.recent = recent;
+                p.recent_off = !tracking;
                 p.cloud = cloud;
                 p.extras_loaded = true;
                 cx.notify();
@@ -331,5 +422,68 @@ mod pins_follow_tests {
         );
         assert_eq!(pins_after(&pins, Path::new(r"C:\a\Wor"), None), None, "a name that only starts the same is another folder");
         assert_eq!(pins_after(&pins, Path::new(r"E:\x"), None), None);
+    }
+}
+
+/// How many looks in a row (5 s apart) a device may be missing from This PC before it leaves the sidebar.
+const DEVICE_MISSES: u8 = 4;
+
+/// The devices to show after a look at This PC that found `found`: a device that is missing keeps its place until it has been missing
+/// `limit` looks in a row (`misses` counts them). Issue 217: a receiver on the Wi-Fi (Denon AVR-X1800H), a DSL box, are media devices
+/// the shell finds on the network on one look and not on the next, and they came and went in the sidebar every few seconds; Explorer
+/// keeps them. A new device is shown at once.
+fn steady_devices(
+    shown: &[rf_win::shellfolder::ShellChild],
+    found: Vec<rf_win::shellfolder::ShellChild>,
+    misses: &mut std::collections::HashMap<String, u8>,
+    limit: u8,
+) -> Vec<rf_win::shellfolder::ShellChild> {
+    let mut out = found;
+    for d in &out {
+        misses.remove(&d.parsing);
+    }
+    for d in shown {
+        if out.iter().any(|f| f.parsing == d.parsing) {
+            continue;
+        }
+        let n = misses.entry(d.parsing.clone()).or_insert(0);
+        *n += 1;
+        if *n < limit {
+            out.push(d.clone());
+        } else {
+            misses.remove(&d.parsing);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod steady_device_tests {
+    use super::steady_devices;
+    use rf_win::shellfolder::ShellChild;
+
+    fn dev(name: &str) -> ShellChild {
+        ShellChild { name: name.into(), parsing: format!("::{{x}}\\{name}"), is_folder: true, fs_path: None, size: None, modified_ms: None }
+    }
+
+    #[test]
+    fn a_device_missing_from_a_look_or_two_stays_and_one_gone_for_good_leaves() {
+        let mut misses = Default::default();
+        let mut shown = steady_devices(&[], vec![dev("phone"), dev("receiver")], &mut misses, 3);
+        assert_eq!(shown.len(), 2);
+        // the receiver is not found twice: still shown
+        for _ in 0..2 {
+            shown = steady_devices(&shown, vec![dev("phone")], &mut misses, 3);
+            assert_eq!(shown.len(), 2);
+        }
+        // found again: its count starts over
+        shown = steady_devices(&shown, vec![dev("phone"), dev("receiver")], &mut misses, 3);
+        for _ in 0..2 {
+            shown = steady_devices(&shown, vec![dev("phone")], &mut misses, 3);
+        }
+        assert_eq!(shown.len(), 2);
+        // the third look in a row without it: gone
+        shown = steady_devices(&shown, vec![dev("phone")], &mut misses, 3);
+        assert_eq!(shown.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["phone"]);
     }
 }

@@ -12,6 +12,8 @@ pub struct Palette {
     pub titlebar_bg: Hsla,
     pub sidebar_bg: Hsla,
     pub content_bg: Hsla,
+    pub address_bg: Hsla,
+    pub toolbar_bg: Hsla,
     /// Opaque surface for menus, dialogs and inputs that float over other content.
     pub card_bg: Hsla,
     /// A bar of our own with controls and text in it that no other layer backs (the Open / Save window's name row). Clear on every
@@ -71,6 +73,8 @@ impl Palette {
             titlebar_bg: hexa(0xEBEBEB, 0.0),
             sidebar_bg: hexa(0xFFFFFF, 0.0),
             content_bg: hexa(0xFFFFFF, 0.50),
+            address_bg: hexa(0x000000, 0.0),
+            toolbar_bg: hexa(0x000000, 0.0),
             card_bg: hex(0xF9F9F9),
             bar_bg: hexa(0xF9F9F9, 0.0),
             tile_bg: hexa(0xFFFFFF, 0.70),
@@ -100,6 +104,8 @@ impl Palette {
             titlebar_bg: hexa(0x000000, 0.0),
             sidebar_bg: hexa(0x000000, 0.0),
             content_bg: hex(0x000000),
+            address_bg: hexa(0x000000, 0.0),
+            toolbar_bg: hexa(0x000000, 0.0),
             card_bg: hex(0x0A0A0A),
             bar_bg: hexa(0x000000, 0.0),
             tile_bg: hexa(0xFFFFFF, 0.04),
@@ -129,6 +135,8 @@ impl Palette {
             // darker than Fluent's LayerFill (#3A3A3A 30%), close to Explorer's content pane
             // (~#1B1B1B over Mica): calmer, less desktop tint behind the files
             content_bg: hexa(0x141414, 0.45),
+            address_bg: hexa(0x000000, 0.0),
+            toolbar_bg: hexa(0x000000, 0.0),
             card_bg: hex(0x2C2C2C),
             bar_bg: hexa(0x2C2C2C, 0.0),
             tile_bg: hexa(0xFFFFFF, 0.0512),
@@ -161,10 +169,25 @@ impl Palette {
                 _ => Self::light(),
             },
         };
+        let explorer_look = crate::settings::windows_file_explorer_theme();
+        if explorer_look && !p.dark {
+            p.titlebar_bg = hex(0xE8E8E8);
+            p.sidebar_bg = hex(0xFFFFFF);
+            p.content_bg = hex(0xFFFFFF);
+            p.address_bg = hex(0xF0F5F9);
+            p.toolbar_bg = hex(0xFCFDFF);
+            p.tab_active = hex(0xF8F8F8);
+        }
+        if explorer_look && !p.dark && window.is_window_active() {
+            p.titlebar_bg = hex(0xCCDEEC);
+            p.tab_active = hex(0xF0F5F9);
+        }
         if crate::settings::solid_backdrop() {
             // "Solid" material: Windows 11's plain window color instead of Mica
             p.window_bg = if p.dark { hex(0x202020) } else { hex(0xF3F3F3) };
         }
+        // the user's theme folder: its colours over these (issues 93 and 94)
+        crate::themes::apply(&mut p);
         if crate::settings::theme_override() == crate::settings::ThemePref::Black {
             // (opaque black whatever the material: no glass, no washes)
             return p;
@@ -177,6 +200,12 @@ impl Palette {
             // At the strength made for Mica they hid two thirds of it in the dark theme (the user: too black), so the default is half
             // of that; the HyperGlass "surface wash" setting moves it either way.
             (p.window_bg.a, p.content_bg.a) = glass_washes(p.dark, crate::settings::hg_surface());
+            if explorer_look {
+                p.titlebar_bg.a = 0.0;
+                p.sidebar_bg.a = 0.0;
+                p.address_bg = Hsla { a: glass_bar_wash(crate::settings::hg_surface()), ..p.card_bg };
+                p.toolbar_bg = Hsla { a: glass_bar_wash(crate::settings::hg_surface()), ..p.card_bg };
+            }
             p.bar_bg = Hsla { a: glass_bar_wash(crate::settings::hg_surface()), ..p.card_bg };
         }
         p
@@ -276,7 +305,20 @@ pub fn kind_color(cat: crate::icons::Category, dark: bool) -> Hsla {
 /// The selection marker shared by every list (sidebar, details, columns, menus): a short
 /// rounded accent bar on the left edge of a selected row. The row must be `relative()`.
 pub fn selection_pill(p: &Palette) -> Div {
-    div().absolute().left(px(0.)).top(px(8.)).bottom(px(8.)).w(px(3.)).rounded_full().bg(p.accent)
+    selection_pill_joined(p, false, false)
+}
+
+/// The pill of a selected row whose neighbour above or below is selected too: it reaches nearly to that edge, so that a run of
+/// selected rows reads as one block while each row keeps a pill of its own to count by (a small gap between them). The user,
+/// 2026-11-20: "ortadakiler birleşik gibi mi olsa ... hem bir görünür hem de sayılabilir çizgiler ile".
+pub fn selection_pill_joined(p: &Palette, above: bool, below: bool) -> Div {
+    let (top, bottom) = pill_insets(above, below);
+    div().absolute().left(px(0.)).top(px(top)).bottom(px(bottom)).w(px(3.)).rounded_full().bg(p.accent)
+}
+
+/// How far the pill stays from the row's top and bottom: 8 px on a side with no selected neighbour, 2 px towards one.
+pub fn pill_insets(above: bool, below: bool) -> (f32, f32) {
+    (if above { 2. } else { 8. }, if below { 2. } else { 8. })
 }
 
 pub const RADIUS: Pixels = px(8.);
@@ -284,9 +326,45 @@ pub const RADIUS_SM: Pixels = px(6.);
 pub const ROW_H: Pixels = px(30.);
 pub const TITLEBAR_H: Pixels = px(40.);
 
+/// The file manager window's tab row: [`TITLEBAR_H`], or 32 with "Compact window" (the tabs are 28 high and stand at its bottom).
+pub fn titlebar_h() -> Pixels {
+    if crate::settings::compact_window() { px(32.) } else { TITLEBAR_H }
+}
+
+/// The address bar's row (`explorer`: the Windows File Explorer look, which keeps its own).
+pub fn address_row_h(explorer: bool) -> f32 {
+    if explorer {
+        60.
+    } else if crate::settings::compact_window() {
+        40.
+    } else {
+        48.
+    }
+}
+
+/// The command bar's row (`explorer`: as in [`address_row_h`]).
+pub fn command_bar_h(explorer: bool) -> f32 {
+    if explorer {
+        58.
+    } else if crate::settings::compact_window() {
+        38.
+    } else {
+        44.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{glass_bar_wash, glass_washes};
+
+    #[test]
+    fn a_run_of_selected_rows_has_long_pills_with_small_gaps_and_a_lone_row_its_short_one() {
+        assert_eq!(super::pill_insets(false, false), (8., 8.));
+        assert_eq!(super::pill_insets(true, true), (2., 2.));
+        // the gap between two pills in a run: one row's bottom and the next one's top
+        let gap = super::pill_insets(false, true).1 + super::pill_insets(true, false).0;
+        assert_eq!(gap, 4.);
+    }
 
     #[test]
     fn a_bar_over_glass_always_keeps_a_wash_of_its_own() {

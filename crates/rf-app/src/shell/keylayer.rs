@@ -51,8 +51,9 @@ pub fn log_only_from(value: Option<&str>) -> bool {
 
 /// Which of the two layers the settings ask for: (Windows key, Alt+Tab).
 pub fn wanted(s: &Settings) -> (bool, bool) {
-    // (the dock switch and each part's own value: `dock::parts`)
-    (crate::dock::parts::runs(s, Part::WinKey), crate::dock::parts::runs(s, Part::Switcher))
+    // (the dock switch and each part's own value: `dock::parts`; the Windows key opens OUR Start only while our Start is on: with it
+    // off the key is Windows' own, as the Start button's click is (issue 155: the key still opened ours))
+    (crate::dock::parts::runs(s, Part::WinKey) && s.dock_own_start, crate::dock::parts::runs(s, Part::Switcher))
 }
 
 /// Whether Win+E, Win+D and Win+Shift+S are ours: the Windows-key switch is on and Explorer is NOT the shell (`mode` is what the host last saw; `None`
@@ -96,6 +97,8 @@ pub trait Actions {
     fn show_desktop(&mut self);
     /// Win+Shift+S: our screen snip.
     fn start_snip(&mut self);
+    /// Win+1 .. Win+9: the dock's n-th app (0-based), as a click on its icon.
+    fn dock_app(&mut self, n: u8);
     /// An effect of the chord, for the open switcher.
     fn apply(&mut self, effect: Effect);
     /// Closes the switcher if one is open and says whether there was one.
@@ -161,6 +164,14 @@ pub fn handle(p: Posted, log_only: bool, shared: &Shared, a: &mut dyn Actions) {
             } else {
                 a.show_desktop();
                 a.log("win+d: show desktop toggled");
+            }
+        }
+        Posted::WinCombo(Combo::App(n)) => {
+            if log_only {
+                a.log(&format!("win+{}: would open the dock's app (log only)", n + 1));
+            } else {
+                a.dock_app(n);
+                a.log(&format!("win+{}: the dock's app", n + 1));
             }
         }
         Posted::WinCombo(Combo::Snip) => {
@@ -253,6 +264,10 @@ impl Actions for GpuiActions<'_> {
         crate::snip::start(self.cx);
     }
 
+    fn dock_app(&mut self, n: u8) {
+        crate::dock::open_app_number(usize::from(n), self.cx);
+    }
+
     fn apply(&mut self, effect: Effect) {
         switcher::apply_effect(effect, self.cx);
     }
@@ -274,7 +289,7 @@ impl Actions for GpuiActions<'_> {
 
 /// Our Show Desktop. The driver remembers which windows it minimized, so it lives as long as the process; the work is done on a thread
 /// of its own (it enumerates every window and asks each to minimize or restore, without waiting).
-fn toggle_show_desktop() {
+pub(crate) fn toggle_show_desktop() {
     use rf_win::desktop::showdesktop::{Driver, SystemOps};
     static DRIVER: parking_lot::Mutex<Option<Driver<SystemOps>>> = parking_lot::Mutex::new(None);
     let spawned = std::thread::Builder::new().name("rf-show-desktop".into()).spawn(|| {
@@ -367,6 +382,8 @@ fn apply(cx: &mut App, role: Role) {
     let host = cx.global_mut::<KeysHost>();
     host.service.set_combos(combos);
     host.service.set_win_e(win_e);
+    // (the dock stands in for Windows' taskbar, whose Win+1 .. Win+9 then do nothing: issue 91, beside Explorer too)
+    host.service.set_digits(role == Role::Dock && win && dock_enabled);
     match host.service.set_wanted(win, alt) {
         Ok(()) => {
             // the one line that says the layer is ready and what it does now (again when that changes, e.g. Explorer came back)
@@ -507,6 +524,7 @@ mod tests {
         files: u32,
         desktops: u32,
         snips: u32,
+        apps: Vec<u8>,
     }
 
     impl Actions for Fake {
@@ -527,6 +545,9 @@ mod tests {
         }
         fn show_desktop(&mut self) {
             self.desktops += 1;
+        }
+        fn dock_app(&mut self, n: u8) {
+            self.apps.push(n);
         }
         fn start_snip(&mut self) {
             self.snips += 1;
@@ -559,6 +580,8 @@ mod tests {
         assert_eq!(wanted(&back), (true, true));
         // wrong values hold the layer off (a typo must not install a keyboard hook); a false does too
         assert_eq!(wanted(&Settings::parse_lenient_pub("dock_enabled = true\nshell_win_key = \"evet\"\nshell_own_switcher = 3\n").unwrap()), (false, false));
+        let own_off = Settings { dock_enabled: true, shell_win_key: true, dock_own_start: false, ..Default::default() };
+        assert!(!wanted(&own_off).0, "our Start off: the Windows key is Windows' own (issue 155)");
         let one = Settings { dock_enabled: true, shell_win_key: false, ..Default::default() };
         assert_eq!(wanted(&one), (false, true));
         // the file an older build saved: every part false, the dock on: no hook is installed by the update

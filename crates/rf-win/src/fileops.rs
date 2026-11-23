@@ -27,15 +27,41 @@ pub enum Transfer {
 }
 
 fn item(p: &Path) -> anyhow::Result<IShellItem> {
-    let w = wide(p);
-    Ok(unsafe { SHCreateItemFromParsingName(PCWSTR(w.as_ptr()), None)? })
+    let w = crate::wide::shell_name(p);
+    match unsafe { SHCreateItemFromParsingName(PCWSTR(w.as_ptr()), None) } {
+        Ok(item) => Ok(item),
+        // a phone's item the shell does not take back by its name (issue 221): found by walking down to it
+        Err(_) if crate::shellfolder::is_namespace_name(&p.to_string_lossy()) => crate::shellfolder::bind(&p.to_string_lossy()),
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn new_op(flags: u32) -> anyhow::Result<IFileOperation> {
     ensure_com();
     let op: IFileOperation = unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_ALL)? };
     unsafe { op.SetOperationFlags(FILEOPERATION_FLAGS(flags))? };
+    let owner = DIALOG_OWNER.load(std::sync::atomic::Ordering::Relaxed);
+    if owner != 0 {
+        let hwnd = windows::Win32::Foundation::HWND(owner as *mut _);
+        if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)) }.as_bool() {
+            let _ = unsafe { op.SetOwnerWindow(hwnd) };
+        }
+    }
     Ok(op)
+}
+
+/// The window the shell engine's own windows (Replace or Skip, "Destination Folder Access Denied", its progress) belong to: the
+/// app's window the user used last ([`set_dialog_owner`]).
+///
+/// WHY (issue 187: replacing a file in `C:\Program Files (x86)` "nothing happened", the job stayed "processing" in the Status
+/// Center). Such a file is handed to the shell engine, which asks for administrator rights in a window of its own; with no owner
+/// that window opened BEHIND rustyfiles (tried: `#32770` "Destination Folder Access Denied", owner none, not in front), and the job
+/// waited for an answer nobody could see.
+static DIALOG_OWNER: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+/// Remembers the app's window in front, for the shell engine's windows ([`DIALOG_OWNER`]).
+pub fn set_dialog_owner(hwnd: isize) {
+    DIALOG_OWNER.store(hwnd, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// A tracker nobody listens to and nobody cancels (the untracked operations still attach the progress sink: it is how the supervisor
@@ -168,14 +194,40 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
 /// `name`, `name (2)`, … (the caller passes the name in the UI language) — returns the created path.
 pub fn new_folder(dir: &Path, name: &str) -> anyhow::Result<PathBuf> {
     let p = unique_name(dir, name, "");
-    std::fs::create_dir(&p)?;
+    match std::fs::create_dir(&p) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => new_item_by_shell(&p, true)?,
+        r => r?,
+    }
     Ok(p)
 }
 
 pub fn new_text_file(dir: &Path, name: &str) -> anyhow::Result<PathBuf> {
     let p = unique_name(dir, name, ".txt");
-    std::fs::OpenOptions::new().write(true).create_new(true).open(&p)?;
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => new_item_by_shell(&p, false)?,
+        r => drop(r?),
+    }
     Ok(p)
+}
+
+/// Makes the folder or empty file `p` with the shell's engine: for a folder only administrators may write to (`Program Files`,
+/// `Windows`), where the plain call is refused. The engine asks for the rights in its own window ("Destination Folder Access Denied",
+/// which belongs to the app's window: [`DIALOG_OWNER`]), as Explorer does (issue 195: "Trying to create a new folder ... in
+/// C:\Program Files (x86) or C:\Program Files doesn't work, nothing happens"). An error when the user says no.
+fn new_item_by_shell(p: &Path, folder: bool) -> anyhow::Result<()> {
+    use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+    needs_shell(Op::Copy)?;
+    let dir = p.parent().ok_or_else(|| anyhow::anyhow!("no parent folder"))?.to_path_buf();
+    let name = wide(p.file_name().unwrap_or_default());
+    let target = p.to_path_buf();
+    engine(Op::Copy, move |life| {
+        let op = new_op(FOF_NOCONFIRMMKDIR.0 as u32)?;
+        let attrs = if folder { FILE_ATTRIBUTE_DIRECTORY } else { FILE_ATTRIBUTE_NORMAL };
+        unsafe { op.NewItem(&item(&dir)?, attrs.0, PCWSTR(name.as_ptr()), PCWSTR::null(), None)? };
+        anyhow::ensure!(perform_tracked(&op, quiet_tracker(), life)?, "making the new item was cancelled");
+        anyhow::ensure!(target.exists(), "the new item was not made");
+        Ok(())
+    })
 }
 
 pub fn unique_name(dir: &Path, stem: &str, ext: &str) -> PathBuf {
@@ -483,5 +535,89 @@ mod tests {
         });
         assert!(!d.join("tree").exists() && !d.join("lone.txt").exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Issue 187: what the shell's engine shows when a copy into a protected folder needs administrator rights, and whether that
+    /// window can be seen (visible, in front). Every window it opens is CANCELLED (WM_CLOSE) after a look: nothing is written, no
+    /// elevation is asked. A look: `cargo test -p rf-win --lib fileops::tests::protected_copy_look -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn protected_copy_look() {
+        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GW_OWNER, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+            PostMessageW, WM_CLOSE,
+        };
+        let src = std::env::temp_dir().join("rf-187-look.txt");
+        std::fs::write(&src, "x").unwrap();
+        let dest = PathBuf::from(r"C:\Program Files (x86)");
+        let watcher = std::thread::spawn(|| {
+            let me = std::process::id();
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..40 {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                let mut found: Vec<isize> = Vec::new();
+                unsafe extern "system" fn each(h: HWND, l: LPARAM) -> windows::core::BOOL {
+                    let v = unsafe { &mut *(l.0 as *mut (u32, Vec<isize>)) };
+                    let mut pid = 0;
+                    unsafe { GetWindowThreadProcessId(h, Some(&mut pid)) };
+                    if pid == v.0 && unsafe { IsWindowVisible(h) }.as_bool() {
+                        v.1.push(h.0 as isize);
+                    }
+                    true.into()
+                }
+                let mut st: (u32, Vec<isize>) = (me, Vec::new());
+                unsafe {
+                    let _ = EnumWindows(Some(each), LPARAM(&mut st as *mut _ as isize));
+                }
+                found.extend(st.1);
+                for h in found {
+                    let hw = HWND(h as *mut _);
+                    if seen.insert(h) {
+                        let mut c = [0u16; 64];
+                        let mut t = [0u16; 128];
+                        let n = unsafe { GetClassNameW(hw, &mut c) } as usize;
+                        let m = unsafe { GetWindowTextW(hw, &mut t) } as usize;
+                        let owner = unsafe { GetWindow(hw, GW_OWNER) }.map(|o| o.0 as isize).unwrap_or(0);
+                        let front = unsafe { GetForegroundWindow() }.0 as isize == h;
+                        println!("window {h:#x} class={} title={:?} owner={owner:#x} in_front={front}", String::from_utf16_lossy(&c[..n]), String::from_utf16_lossy(&t[..m]));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                    let _ = unsafe { PostMessageW(Some(hw), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+                }
+            }
+        });
+        // an owner of our own, as the app's window is (`RF_187_OWNER=1`): a plain window, not shown in front of anything
+        if std::env::var("RF_187_OWNER").is_ok() {
+            use windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW};
+            // (on a thread that pumps its messages, as the app's window thread does: the dialog talks to its owner)
+            let (tx, rx) = std::sync::mpsc::channel::<isize>();
+            std::thread::spawn(move || {
+                use windows::Win32::UI::WindowsAndMessaging::{DispatchMessageW, GetMessageW, MSG};
+                let owner = unsafe {
+                    CreateWindowExW(WINDOW_EX_STYLE(0), windows::core::w!("STATIC"), windows::core::w!("rf-187 owner"), WS_OVERLAPPEDWINDOW, 0, 0, 200, 100, None, None, None, None)
+                }
+                .unwrap();
+                let _ = tx.send(owner.0 as isize);
+                let mut msg = MSG::default();
+                while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+                    unsafe { DispatchMessageW(&msg) };
+                }
+            });
+            let owner = rx.recv().unwrap();
+            println!("owner window {owner:#x}");
+            set_dialog_owner(owner);
+        }
+        if std::env::var("RF_195_NEW_FOLDER").is_ok() {
+            // issue 195: a new folder there (the plain call is refused, the engine asks; the watcher cancels its question)
+            let r = new_folder(&dest, "rf-195-look");
+            println!("new folder: {r:?}; made: {}", dest.join("rf-195-look").exists());
+        } else {
+            let t = Arc::new(Tracker::new(Box::new(|_, _, _| {}), Arc::new(AtomicBool::new(false))));
+            let r = transfer_tracked(Transfer::Copy, &[src.clone()], &dest, t);
+            println!("result: {r:?}; written: {}", dest.join("rf-187-look.txt").exists());
+        }
+        watcher.join().unwrap();
+        let _ = std::fs::remove_file(&src);
     }
 }

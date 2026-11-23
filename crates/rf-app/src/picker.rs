@@ -22,6 +22,9 @@ use crate::workspace::Workspace;
 /// Single-instance message: "pick this pipe's request".
 pub const PICK_PREFIX: &str = "\u{1}pick:";
 
+/// At most this many folders of rustyfiles' windows come into the dialog as tabs.
+const MORE_TABS: usize = 12;
+
 pub struct PickSession {
     pub req: Request,
     /// Taken by the answer: each request is answered exactly once.
@@ -108,6 +111,59 @@ pub(crate) fn folder_choice(takes: bool, sel: &[(PathBuf, bool)], typed: &str, d
     }
 }
 
+/// The app's key in `Settings::dialog_folders`: its program name in lower case (empty when the dialog did not say).
+fn app_key(req: &Request) -> String {
+    req.app.trim().to_lowercase()
+}
+
+/// The pin button of the dialog's strip: the app's Open / Save window always starts in the folder shown now, or (pressed again
+/// there) starts where the app asks again. Only when the dialog named its app.
+fn start_pin(ws: &Workspace, s: &PickSession, p: &Palette, cx: &mut Context<Workspace>) -> Option<AnyElement> {
+    use gpui_kit::assets::IconName as L;
+    let key = app_key(&s.req);
+    if key.is_empty() {
+        return None;
+    }
+    let kept = cx.try_global::<crate::settings::Settings>().and_then(|st| st.dialog_folders.get(&key).cloned());
+    let dir = ws.active_view().read(cx).current_dir();
+    let here = matches!((&kept, &dir), (Some(k), Some(d)) if Path::new(k) == d.as_path());
+    let app = s.req.app.trim().trim_end_matches(".exe").trim_end_matches(".EXE").to_string();
+    let tip: SharedString = if here {
+        format!("{} {app}", t!("Artık hep burada açılmasın:")).into()
+    } else {
+        format!("{} {app}", t!("Hep bu klasörde açılsın:")).into()
+    };
+    let (accent, icon_color) = (p.accent, p.text_secondary);
+    Some(
+        div()
+            .id("pick-start-pin")
+            .size(px(36.))
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .rounded(theme::RADIUS_SM)
+            .cursor_pointer()
+            .border_1()
+            .border_color(p.border)
+            .bg(p.card_bg)
+            .hover(|d| d.bg(p.hover))
+            .child(Icon::new(L::Pin).size(px(16.)).text_color(if here { accent } else { icon_color }))
+            .tooltip(move |w, cx| gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(w, cx))
+            .on_click(move |_, _, cx| {
+                let (key, dir) = (key.clone(), dir.clone());
+                crate::settings::update(cx, move |st| {
+                    if here {
+                        st.dialog_folders.remove(&key);
+                    } else if let Some(d) = dir {
+                        st.dialog_folders.insert(key, d.display().to_string());
+                    }
+                });
+            })
+            .into_any_element(),
+    )
+}
+
 fn mode_title(mode: Mode) -> &'static str {
     match mode {
         Mode::Open => t!("Aç"),
@@ -128,20 +184,49 @@ fn ok_label(req: &Request) -> SharedString {
     .into()
 }
 
-/// Roomy enough for the list and the preview side by side: 1240x780, at most 85 % of the screen.
+/// The size the user left the dialog at, else room for the list and the preview side by side: 1100x700, at most 70 % of the screen
+/// (issue 89: 1240x780 up to 85 % covered nearly all of a 1080p laptop's screen at its usual scaling).
 fn picker_size(cx: &App) -> Size<Pixels> {
     let screen = cx.primary_display().map(|d| d.bounds().size).unwrap_or(size(px(1920.), px(1080.)));
-    size(px(1240.).min(screen.width * 0.85), px(780.).min(screen.height * 0.85))
+    picker_size_for(cx.global::<crate::settings::Settings>().picker_size, screen)
+}
+
+fn picker_size_for(kept: Option<[u16; 2]>, screen: Size<Pixels>) -> Size<Pixels> {
+    match kept {
+        // (a size kept on a bigger screen still fits this one)
+        Some([w, h]) => size(px(f32::from(w)).min(screen.width * 0.95).max(px(640.)), px(f32::from(h)).min(screen.height * 0.95).max(px(400.))),
+        None => size(px(1100.).min(screen.width * 0.7), px(700.).min(screen.height * 0.7)),
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    // (not `super::*`: GPUI's own `test` attribute would come with it)
+    use super::picker_size_for;
+    use gpui_kit::{px, size};
+
+    #[test]
+    fn the_dialog_opens_at_the_size_it_was_left_at_within_the_screen() {
+        let laptop = size(px(1280.), px(720.));
+        let first = picker_size_for(None, laptop);
+        assert!(first.width <= px(896.) && first.height <= px(504.), "at most 70 % of a 1080p laptop at 150 %: {first:?}");
+        assert_eq!(picker_size_for(None, size(px(2560.), px(1440.))), size(px(1100.), px(700.)));
+        assert_eq!(picker_size_for(Some([900, 560]), laptop), size(px(900.), px(560.)));
+        let big = picker_size_for(Some([2400, 1300]), laptop);
+        assert!(big.width <= px(1216.) && big.height <= px(684.), "{big:?}");
+    }
 }
 
 fn open_window(pipe: File, req: Request, cx: &mut App) {
     crate::preview_trace::process_facts("picker: window requested");
     // (bounded: a folder on a place that has to wake up first, a WSL distribution, must not hold the dialog's window back)
-    let start = req
-        .folder
-        .as_deref()
+    // the folder the user pinned for this app comes first, then the one the app asks for
+    let kept = cx.try_global::<crate::settings::Settings>().and_then(|s| s.dialog_folders.get(&app_key(&req)).cloned());
+    let start = kept
+        .into_iter()
+        .chain(req.folder.clone())
         .map(PathBuf::from)
-        .filter(|p| crate::is_dir_bounded(p.clone(), std::time::Duration::from_secs(2)) != Some(false))
+        .find(|p| crate::is_dir_bounded(p.clone(), std::time::Duration::from_secs(2)) != Some(false))
         .map(Location::Path)
         .unwrap_or(Location::Home);
     let title = {
@@ -155,6 +240,13 @@ fn open_window(pipe: File, req: Request, cx: &mut App) {
         window_background: crate::theme::window_material(WindowBackgroundAppearance::MicaBackdrop),
         ..gpui_kit::component::TitleBar::window_options()
     };
+    // the folders open in rustyfiles' own windows come along as tabs (issue 226), after the one the dialog starts in
+    let start_path = start.path().map(Path::to_path_buf);
+    let others: Vec<PathBuf> = crate::workspace::open_folders(cx)
+        .into_iter()
+        .filter(|p| start_path.as_ref().is_none_or(|s| !s.as_os_str().eq_ignore_ascii_case(p.as_os_str())))
+        .take(MORE_TABS)
+        .collect();
     let pipe = RefCell::new(Some(pipe));
     let shown_hwnd = Rc::new(Cell::new(0isize));
     let sh = shown_hwnd.clone();
@@ -175,6 +267,9 @@ fn open_window(pipe: File, req: Request, cx: &mut App) {
         let pipe = pipe.borrow_mut().take();
         cx.new(|cx| {
             let mut ws = Workspace::new(Some(start), None, window, cx);
+            for p in others {
+                ws.add_quiet_tab(Location::Path(p), window, cx);
+            }
             let name = cx.new(|cx| InputState::new(window, cx).default_value(req.file_name.clone()));
             let session = Rc::new(PickSession {
                 filter_ix: Cell::new(req.filter_index.max(1)),
@@ -190,7 +285,21 @@ fn open_window(pipe: File, req: Request, cx: &mut App) {
                 }
             });
             *session._sub.borrow_mut() = Some(sub);
+            let save = session.req.mode == Mode::Save;
             ws.set_picker(session, window, cx);
+            // Save: the name is what the user came to type, so the box has the keyboard with the name selected up to its extension,
+            // as in Windows' own dialog; nothing had it, and typing went nowhere (Discord, 2026-11-23). On the next frame: a focus
+            // target that is not part of the frame being drawn is dropped by GPUI.
+            if save {
+                cx.on_next_frame(window, move |_, window, cx| {
+                    name.update(cx, |s, cx| {
+                        let text = s.value().to_string();
+                        let stem = text.rfind('.').filter(|&i| i > 0).unwrap_or(text.len());
+                        s.focus(window, cx);
+                        s.set_selected_range(0..stem, cx);
+                    });
+                });
+            }
             crate::preview_trace::mark("picker: workspace built");
             ws
         })
@@ -317,11 +426,13 @@ fn finish(ws: &mut Workspace, paths: Vec<PathBuf>, window: &mut Window) {
     if let Some(s) = ws.picker() {
         s.answer(Response { ok: true, paths: paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(), filter_index: s.filter_ix.get() });
     }
+    Workspace::release_preview_host(window);
     window.remove_window();
 }
 
 pub(crate) fn cancel(ws: &mut Workspace, window: &mut Window) {
     answer_cancel(ws);
+    Workspace::release_preview_host(window);
     window.remove_window();
 }
 
@@ -532,6 +643,7 @@ pub(crate) fn footer(ws: &mut Workspace, s: &Rc<PickSession>, p: &Palette, windo
         .border_color(p.divider)
         // over glass this strip (name field, file type, buttons) has a wash of its own, as the window's layers are thin there
         .bg(p.bar_bg)
+        .children(start_pin(ws, s, p, cx))
         .child(
             // the same field look as the select box next to it
             h_flex()

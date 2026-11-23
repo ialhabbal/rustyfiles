@@ -7,17 +7,21 @@ enum Metrics {
     /// The corner of a macOS 26 window with a compact toolbar; the window's glass follows it.
     static let windowRadius: CGFloat = 16
     static let radiusSmall: CGFloat = 6
-    static let titleBarHeight: CGFloat = 40
-    static let navRowHeight: CGFloat = 48
-    static let commandBarHeight: CGFloat = 44
+    /// Settings › Appearance › Compact window (theme.rs `titlebar_h`, `address_row_h`,
+    /// `command_bar_h`): thinner tab, address and command rows, and the card reaching the
+    /// window's right and bottom edges. Icons and text keep their size.
+    nonisolated(unsafe) static var compact = UserDefaults.standard.bool(forKey: "compactWindow")
+    static var titleBarHeight: CGFloat { compact ? 32 : 40 }
+    static var navRowHeight: CGFloat { compact ? 40 : 48 }
+    static var commandBarHeight: CGFloat { compact ? 38 : 44 }
     static let headerHeight: CGFloat = 30
     static let rowHeight: CGFloat = 30
     static let statusBarHeight: CGFloat = 32
     static let sidebarWidth: CGFloat = 232
     static let sidebarMin: CGFloat = 160
     static let sidebarMax: CGFloat = 420
-    static let bottomSpacer: CGFloat = 8
-    static let cardRightMargin: CGFloat = 8
+    static var bottomSpacer: CGFloat { compact ? 0 : 8 }
+    static var cardRightMargin: CGFloat { compact ? 0 : 8 }
     /// Where the window's own buttons end on the left (the Windows app has its caption buttons on the right).
     static let trafficLightsWidth: CGFloat = 78
 
@@ -30,6 +34,8 @@ enum Metrics {
     @MainActor
     private static func font(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
         let family = UserDefaults.standard.string(forKey: "fontFamily") ?? ""
+        // Settings › Appearance › Text size (settings.rs `text_percent`: 87, 100 or 112 %)
+        let size = (size * CGFloat(AppSettings.textPercent) / 100).rounded()
         let system = NSFont.systemFont(ofSize: size, weight: weight)
         guard !family.isEmpty else { return system }
         let traits: NSFontTraitMask = weight == .regular ? [] : [.boldFontMask]
@@ -99,8 +105,12 @@ enum Draw {
     }
 
     /// The selection marker: a 3 px accent pill on the left edge of `r`, 8 px off the top and bottom (theme.rs `selection_pill`).
-    static func selectionPill(in r: NSRect, accent: NSColor) {
-        let pill = NSRect(x: r.minX, y: r.minY + 8, width: 3, height: max(r.height - 16, 4))
+    /// `above` / `below`: the neighbouring row there is selected too, and the pill reaches to
+    /// 2 px from that edge, so a run of selected rows reads as one block whose pills can still
+    /// be counted (theme.rs `selection_pill_joined`). In a flipped view.
+    static func selectionPill(in r: NSRect, accent: NSColor, above: Bool = false, below: Bool = false) {
+        let top: CGFloat = above ? 2 : 8, bottom: CGFloat = below ? 2 : 8
+        let pill = NSRect(x: r.minX, y: r.minY + top, width: 3, height: max(r.height - top - bottom, 4))
         roundedRect(pill, radius: 1.5, fill: accent)
     }
 }

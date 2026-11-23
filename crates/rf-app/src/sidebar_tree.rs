@@ -195,6 +195,12 @@ pub struct Holder {
     sub: Option<gpui_kit::Subscription>,
 }
 
+impl Holder {
+    pub(super) fn scroll_handle(&self) -> &ScrollHandle {
+        &self.scroll
+    }
+}
+
 /// The folders of a folder, on a worker thread.
 fn list_folders(path: &Path) -> Result<Vec<DirItem>, ListFailure> {
     let mut out = Vec::new();
@@ -241,6 +247,17 @@ fn root_kind(k: DriveKind) -> RootKind {
     }
 }
 
+/// Freedesktop names for tree roots, so a drive row is a disk or a CD rather than a folder.
+fn root_icon_names(kind: RootKind) -> &'static [&'static str] {
+    match kind {
+        RootKind::Profile => &["user-home", "folder-home"],
+        RootKind::Fixed => &["drive-harddisk", "drive-harddisk-system"],
+        RootKind::Removable => &["drive-removable-media", "drive-harddisk-usb", "drive-harddisk"],
+        RootKind::Network => &["network-server", "folder-remote"],
+        RootKind::Optical => &["drive-optical", "drive-cdrom"],
+    }
+}
+
 impl SidebarTree {
     fn new(places: Entity<Places>, images: Entity<crate::image_cache::ImageCache>, scroll: ScrollHandle, cx: &mut Context<Self>) -> Self {
         let (tx, mut rx) = mpsc::unbounded::<Msg>();
@@ -254,6 +271,7 @@ impl SidebarTree {
         // drives come and go: the roots follow the sidebar's own list of places
         let sub = cx.observe(&places, |t, _, cx| t.refresh_roots(cx));
         let tags_sub = cx.observe_global::<crate::tags::Tags>(|_, cx| cx.notify());
+        let theme_sub = cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify());
         let mut this = Self {
             model: NavTree::new(),
             places,
@@ -280,7 +298,7 @@ impl SidebarTree {
             wanted: HashSet::new(),
             tx,
             _rx_task: task,
-            _subs: vec![sub, tags_sub],
+            _subs: vec![sub, tags_sub, theme_sub],
         };
         this.refresh_roots(cx);
         this
@@ -520,6 +538,25 @@ impl SidebarTree {
         self.apply_key(k, cx);
     }
 
+    /// The keyboard came to the tree with Tab (issue 38: "the selected item should be made visible (jump to item) or if no item is
+    /// selected, select the first"): the keyboard's row, else the open folder's, else the first, is brought into view and is where
+    /// the arrows start.
+    pub(super) fn keyboard_entered(&mut self, cx: &mut Context<Self>) {
+        let row = self
+            .model
+            .cursor_row()
+            .or_else(|| self.model.marked_row().map(|(r, _)| r))
+            .or_else(|| (!self.model.rows().is_empty()).then_some(0));
+        let Some(row) = row else { return };
+        if self.model.cursor_row().is_none()
+            && let Some(id) = self.model.rows().get(row).map(|r| r.id)
+        {
+            self.model.set_cursor(id);
+        }
+        self.goal = Some(Goal { row, centre: false, tries: 2 });
+        cx.notify();
+    }
+
     fn apply_key(&mut self, k: TreeKey, cx: &mut Context<Self>) {
         let r = self.model.key(k, self.now());
         self.start_loads(r.loads, cx);
@@ -667,15 +704,39 @@ impl SidebarTree {
         let covers = !selected && mark == Some((ix, false));
         let cursor = info.cursor && focused;
         let (expanded, can_expand, root, hidden, slow) = (info.expanded, info.can_expand, info.root, info.hidden, info.slow);
-        // a customised folder (not a root) shows the icon Windows gives it, as the file list does (issue 65)
-        let own_icon = (info.own_icon && root.is_none())
-            .then(|| {
-                let (dir, name) = (info.path.parent()?.to_path_buf(), info.path.file_name()?.to_string_lossy().into_owned());
-                let e = rf_core::Entry::new(&name, rf_core::EntryKind::Dir, 0, 0, 0, 0x10 | 0x1);
-                self.images.update(cx, |c, cx| c.icon(&dir, &e, cx))
-            })
-            .flatten();
+        let freedesktop = matches!(crate::settings::icon_theme(), crate::settings::IconThemePref::Freedesktop);
+        let req_px = crate::image_cache::ICON_PX;
+        let (dir, name) = (info.path.parent().unwrap_or_else(|| std::path::Path::new("")), info.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        let e = rf_core::Entry::new(&name, rf_core::EntryKind::Dir, 0, 0, 0, 0x10 | 0x1);
+        // Pack lookup (including `desktop.ini`) runs on a worker. The shell call stays the native path when no pack is active.
+        let folder_picture = if freedesktop {
+            let mut names: Vec<&'static str> = match root {
+                Some(kind) => root_icon_names(kind).to_vec(),
+                None => crate::icon_theme::special_folder_names(info.path).to_vec(),
+            };
+            if root.is_none() {
+                names.extend_from_slice(crate::icon_theme::FOLDER_NAMES);
+            }
+            match self.images.update(cx, |c, cx| c.themed_or_native_picture(dir, &e, &names, req_px, false, cx)) {
+                crate::image_cache::PackPicture::Ready(im) => Some(im),
+                _ => None,
+            }
+        } else if info.own_icon && root.is_none() {
+            // (only a folder whose desktop.ini names a picture: issue 225)
+            self.images.update(cx, |c, cx| if c.folder_names_icon(info.path, cx) { c.icon(dir, &e, cx) } else { None })
+        } else {
+            None
+        };
         let tag_dot = info.path.parent().and_then(|_| crate::tags::first_color(info.path, cx));
+        let root_drive_icon = (cx.global::<crate::settings::Settings>().windows_file_explorer_theme
+            && matches!(root, Some(RootKind::Fixed | RootKind::Removable | RootKind::Network | RootKind::Optical)))
+        .then(|| {
+            self.images.update(cx, |images, cx| {
+                images.shell_icon(&info.path.to_string_lossy(), 16, cx)
+            })
+        })
+        .flatten();
+        let windows_home = cx.global::<crate::settings::Settings>().windows_file_explorer_theme && root == Some(RootKind::Profile);
         let icon_color = match root {
             Some(RootKind::Profile) => p.accent,
             Some(_) => p.text_secondary,
@@ -746,9 +807,13 @@ impl SidebarTree {
                     .relative()
                     .size(px(16.))
                     .flex_shrink_0()
-                    .child(match own_icon {
+                    .child(match folder_picture.or(root_drive_icon) {
                         Some(picture) => img(picture).size(px(16.)).into_any_element(),
-                        None => Icon::new(Self::row_icon(root, expanded)).size(px(16.)).text_color(icon_color).into_any_element(),
+                        None if windows_home => crate::icons::windows_home_icon(px(16.)),
+                        None => Icon::new(Self::row_icon(root, expanded))
+                            .size(px(16.))
+                            .text_color(icon_color)
+                            .into_any_element(),
                     })
                     .when_some(tag_dot, |d, c| d.child(crate::tags::corner_dot(c, p.card_bg))),
             )
@@ -917,6 +982,13 @@ impl Workspace {
         (self.sidebar_open && self.shows_tree(self.sidebar_rail)).then(|| self.side_tree.view.as_ref().map(|v| v.read(cx).focus.clone())).flatten()
     }
 
+    /// The keyboard came to the tree with Tab: see `SidebarTree::keyboard_entered`.
+    pub(super) fn tree_keyboard_entered(&mut self, cx: &mut Context<Self>) {
+        if let Some(t) = self.side_tree.view.clone() {
+            t.update(cx, |t, cx| t.keyboard_entered(cx));
+        }
+    }
+
     pub(super) fn set_tree_peek(&mut self, peek: bool) {
         self.side_tree.in_peek = peek;
     }
@@ -936,7 +1008,10 @@ impl Workspace {
             TreeEvent::Menu(path) => self.sidebar_menu(path.clone(), window, cx),
             // from the keyboard: not the physical Shift key's classic menu, and next to the row, not at the mouse
             TreeEvent::KeyMenu(path, at) => self.sidebar_menu_at(path.clone(), false, *at, window, cx),
-            TreeEvent::Leave => self.focus_active(window, cx),
+            TreeEvent::Leave => {
+                self.focus_active(window, cx);
+                self.active_tab().clone().update(cx, |v, cx| v.keyboard_entered(cx));
+            }
         }
     }
 

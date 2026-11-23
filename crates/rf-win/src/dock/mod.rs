@@ -73,9 +73,11 @@
 //! Everything that blocks (COM, the shell, the disk, other programs' windows) is documented as such and meant for a worker thread.
 
 pub mod appmenu;
+pub mod attention;
 pub mod band;
 pub mod calendar;
 pub mod clock;
+pub mod covered;
 pub mod dragkeys;
 pub mod empty_spot;
 pub mod fullscreen;
@@ -116,6 +118,7 @@ pub mod size_live;
 pub mod system;
 pub mod taskmgr;
 pub mod thin;
+pub mod toastpos;
 pub mod tray_order;
 pub mod tray_strip;
 pub mod tray_tip;

@@ -251,6 +251,11 @@ fn black(a: f32) -> Hsla {
 }
 
 impl DesktopView {
+    /// Whether the wallpaper read last is a running slideshow (the desktop's menu then offers its next picture, issue 206).
+    pub(super) fn slideshow_running(&self) -> bool {
+        self.wall_src.as_ref().is_some_and(|w| w.slideshow.is_some_and(|s| s.running))
+    }
+
     /// What both kinds of view start with: the picture cache, the link to the Status Center, and the channel the worker threads report on.
     fn start(cx: &mut Context<Self>) -> (Entity<ImageCache>, mpsc::UnboundedSender<Msg>) {
         let images = cx.new(ImageCache::new);
@@ -806,7 +811,15 @@ impl DesktopView {
                 let e = Entry::new(&it.name, if it.is_dir { EntryKind::Dir } else { EntryKind::File }, it.size, it.modified_ms, 0, it.attrs);
                 let (thumbs, placeholder, px) = (frame.thumbs, it.cloud_placeholder, frame.icon_px);
                 // an online-only file is shown by its icon, never read for a thumbnail (that would download it)
-                self.images.update(cx, |c, cx| if thumbs && !placeholder { c.thumbnail(&dir, &e, px, cx) } else { c.icon(&dir, &e, cx) })
+                self.images.update(cx, |c, cx| {
+                    if thumbs && !placeholder {
+                        c.thumbnail(&dir, &e, px, cx)
+                    } else if crate::settings::icon_theme() == crate::settings::IconThemePref::Freedesktop {
+                        c.icon_sized(&dir, &e, px, cx)
+                    } else {
+                        c.icon(&dir, &e, cx)
+                    }
+                })
             }
         }
     }

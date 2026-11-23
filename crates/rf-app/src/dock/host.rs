@@ -93,6 +93,8 @@ pub struct Prefs {
     pub all_monitors: bool,
     /// Which dock shows which running app.
     pub apps_where: crate::settings::DockAppsWhere,
+    /// The pinned apps that are not running in the left island (the middle islands sort their items again).
+    pub pins_left: bool,
     /// The side islands are as tall as the middle one.
     pub side_tall: bool,
     /// The right island's own buttons: their order and the hidden ones (the island draws them from the settings; kept here to see a change).
@@ -114,11 +116,12 @@ impl Prefs {
             size: s.dock_size,
             all_monitors: s.dock_all_monitors,
             apps_where: s.dock_apps_where,
+            pins_left: s.dock_pins_left,
             side_tall: s.dock_side_tall,
             status: [s.dock_status_order.clone(), s.dock_status_hidden.clone()],
             search: s.dock_search,
             autohide: s.dock_autohide,
-            opaque: s.dock_opaque,
+            opaque: s.dock_opaque || s.dock_performance,
         }
     }
 
@@ -155,7 +158,7 @@ pub fn changes(old: &Prefs, new: &Prefs) -> Changes {
         city: old.city != new.city || old.location != new.location,
         size: old.size != new.size,
         monitors: old.all_monitors != new.all_monitors,
-        apps: old.apps_where != new.apps_where,
+        apps: old.apps_where != new.apps_where || old.pins_left != new.pins_left,
         side: old.side_tall != new.side_tall,
         status: old.status != new.status,
         search: old.search != new.search,
@@ -975,11 +978,14 @@ pub(super) fn apply_secondary_bands(cx: &mut App) {
         }
     }
     crate::shell::taskbar_hide::other_bands_changed(list, cx);
+    // (with no shell the host keeps these monitors' work areas itself)
+    crate::shell::live::layout_changed(cx);
 }
 
 /// Looks at whether our hide of Explorer's taskbar is in force (the layout of a secondary dock depends on it).
 fn refresh_hide_flag(cx: &mut App) {
-    let force = crate::shell::taskbar_hide::in_force(cx);
+    // (or the host holds the work areas itself, with no shell at all: the same bands, the same placement; see shell::live)
+    let force = crate::shell::taskbar_hide::in_force(cx) || crate::shell::live::holds_edges();
     if let Some(host) = host_mut(cx) {
         host.hide_in_force = force;
     }
@@ -1001,6 +1007,8 @@ fn apply_home_reserve(cx: &mut App) {
     };
     // with Explorer's taskbar hidden by us the host sets the work area itself, from this band (see shell::taskbar_hide)
     crate::shell::taskbar_hide::band_changed(band, cx);
+    // (and with no shell at all: see shell::live)
+    crate::shell::live::layout_changed(cx);
 }
 
 fn on_system_event(ev: SystemEvent, cx: &mut App) {
@@ -1034,7 +1042,7 @@ fn on_system_event(ev: SystemEvent, cx: &mut App) {
             request_layout(cx);
             // the desktop's windows follow the monitors, once they have been quiet (see shell::cover)
             crate::shell::cover::layout_changed(cx);
-            // the work area the host sets itself follows the band's size (only with RUSTYFILES_SET_WORKAREA=1, see shell::live)
+            // the work areas the host sets itself with no shell follow the bands and the monitors (see shell::live)
             crate::shell::live::layout_changed(cx);
         }
         SystemEvent::ThemeChanged => {
@@ -1148,7 +1156,7 @@ fn open_dock(d: &monitors::Display, cx: &mut App) {
     let Some(host) = cx.try_global::<Host>() else { return };
     let id = MonId(host.next_id);
     let lines = rf_win::dock::clock::system_lines();
-    let widths = Widths { left: plan::left_width_secondary(Search::Field), middle: plan::middle_width_at_rest(2, 1), right: plan::right_width_secondary(plan::clock_width(&lines), true) };
+    let widths = Widths { left: plan::left_width_secondary(Search::Field), middle: plan::middle_width_at_rest(2, 0), right: plan::right_width_secondary(plan::clock_width(&lines), true) };
     let mut dock = Dock {
         id,
         name: Some(d.name.clone()),
@@ -1375,12 +1383,14 @@ fn sync_autohide(cx: &mut App) {
 
 /// What auto-hide does with one dock: `Some(true)` puts it away, `Some(false)` brings it up, `None` leaves it as it is. `at_edge`: the
 /// pointer touches its monitor's bottom edge; `near`: the pointer is over the dock's band; `kept`: a panel, the app menu or a preview of
-/// this dock is open; `away_since`: since when the pointer has been away from it.
-fn autohide_decision(tucked: bool, at_edge: bool, near: bool, kept: bool, away_since: Instant, now: Instant) -> Option<bool> {
+/// this dock is open; `covered`: a window lies where the dock stands (always true unless the dock hides only for windows,
+/// `Settings::dock_autohide_windows`: then it stays up while nothing covers it and comes back when the last window there goes);
+/// `away_since`: since when the pointer has been away from it.
+fn autohide_decision(tucked: bool, at_edge: bool, near: bool, kept: bool, covered: bool, away_since: Instant, now: Instant) -> Option<bool> {
     if tucked {
-        return (at_edge || kept).then_some(false);
+        return (at_edge || kept || !covered).then_some(false);
     }
-    if near || kept {
+    if near || kept || !covered {
         return None;
     }
     (now.duration_since(away_since) >= AUTOHIDE_AFTER).then_some(true)
@@ -1402,26 +1412,29 @@ fn autohide_step(cx: &mut App) -> bool {
     let Some((x, y)) = cursor_px() else { return true };
     let active = host.active_dock().id;
     let busy = super::panel::is_open(cx) || super::app_menu::is_open(cx);
-    let looks: Vec<(MonId, rf_win::dock::layout::Rect, i32)> = host
+    let for_windows = cx.try_global::<Settings>().is_some_and(|s| s.dock_autohide_windows);
+    let looks: Vec<(MonId, rf_win::dock::layout::Rect, i32, bool)> = host
         .docks
         .iter()
         .map(|d| {
             let unit = host.scale_size_of(d).map_or(1.0, |(s, z)| rf_win::dock::size::unit(s, z));
             let rect = host.area_of(d).map_or(d.monitor.rect, |(m, _)| m.rect);
-            (d.id, rect, rf_win::dock::thin::reserved_thickness(unit, false))
+            // (where the islands stand when they are up: a window there covers the dock)
+            let covered = !for_windows || d.geo.as_ref().is_none_or(|g| rf_win::dock::covered::window_over(&[g.islands.left, g.islands.middle, g.islands.right]));
+            (d.id, rect, rf_win::dock::thin::reserved_thickness(unit, false), covered)
         })
         .collect();
     let now = Instant::now();
     let mut changed = Vec::new();
     let Some(h) = host_mut(cx) else { return false };
-    for (id, r, band) in looks {
+    for (id, r, band, covered) in looks {
         let Some(d) = h.docks.iter_mut().find(|d| d.id == id) else { continue };
         let in_x = x >= r.left && x < r.right;
         let (at_edge, near, kept) = (in_x && y >= r.bottom - 2, in_x && y >= r.bottom - band - 16, busy && id == active);
         if !d.tucked && (near || kept) {
             d.inside_at = Some(now);
         }
-        match autohide_decision(d.tucked, at_edge, near, kept, *d.inside_at.get_or_insert(now), now) {
+        match autohide_decision(d.tucked, at_edge, near, kept, covered, *d.inside_at.get_or_insert(now), now) {
             Some(down) => {
                 d.tucked = down;
                 d.inside_at = Some(now);
@@ -1577,7 +1590,7 @@ fn apply_reloaded(fresh: Option<Settings>, stamp: Option<SystemTime>, cx: &mut A
     }
     let mut fresh = fresh;
     // (the compact tray: the strip is laid out again when the switch changed)
-    super::tray_strip::apply_compact(fresh.dock_tray_compact, cx);
+    super::tray_strip::apply_compact(fresh.dock_tray_compact, fresh.dock_tray_two_rows, cx);
     // A size slider that is being dragged (or just was) is ahead of the file: the file may hold an earlier step of the same drag.
     let size_verdict = host_mut(cx).map(|h| h.live.file(Instant::now(), fresh.dock_size.permille()));
     if let Some(SizeFile::Keep { recheck }) = size_verdict
@@ -1860,7 +1873,7 @@ pub fn run(messages: Option<UnboundedReceiver<String>>, cx: &mut App) {
     cx.set_global(env);
 
     let lines = rf_win::dock::clock::system_lines();
-    let widths = Widths { left: plan::left_width(None), middle: plan::middle_width_at_rest(2, 1), right: plan::right_width(&lines) };
+    let widths = Widths { left: plan::left_width(None), middle: plan::middle_width_at_rest(2, 0), right: plan::right_width(&lines) };
     let geo = geo_for(&monitor, area, widths, size, prefs.side_tall);
 
     let mut home = Dock {
@@ -2130,7 +2143,7 @@ mod tests {
     }
 
     fn prefs(reserve: bool, city: &str) -> Prefs {
-        Prefs { reserve, city: city.into(), location: false, size: Default::default(), all_monitors: true, apps_where: crate::settings::DockAppsWhere::All, side_tall: false, status: Default::default(), search: Default::default(), autohide: false, opaque: false }
+        Prefs { reserve, city: city.into(), location: false, size: Default::default(), all_monitors: true, apps_where: crate::settings::DockAppsWhere::All, pins_left: false, side_tall: false, status: Default::default(), search: Default::default(), autohide: false, opaque: false }
     }
 
     #[test]
@@ -2139,14 +2152,17 @@ mod tests {
         use std::time::Instant;
         let t0 = Instant::now();
         // away below the edge: the bottom edge or an open panel brings it up, anything else leaves it away
-        assert_eq!(autohide_decision(true, true, true, false, t0, t0), Some(false));
-        assert_eq!(autohide_decision(true, false, false, true, t0, t0), Some(false), "the Start panel opened by the Windows key");
-        assert_eq!(autohide_decision(true, false, true, false, t0, t0 + AUTOHIDE_AFTER * 3), None, "over the band, not at the edge");
+        assert_eq!(autohide_decision(true, true, true, false, true, t0, t0), Some(false));
+        assert_eq!(autohide_decision(true, false, false, true, true, t0, t0), Some(false), "the Start panel opened by the Windows key");
+        assert_eq!(autohide_decision(true, false, true, false, true, t0, t0 + AUTOHIDE_AFTER * 3), None, "over the band, not at the edge");
         // up: stays while the pointer is over it or a panel is open, goes down once the pointer has been away long enough
-        assert_eq!(autohide_decision(false, false, true, false, t0, t0 + AUTOHIDE_AFTER * 3), None);
-        assert_eq!(autohide_decision(false, false, false, true, t0, t0 + AUTOHIDE_AFTER * 3), None);
-        assert_eq!(autohide_decision(false, false, false, false, t0, t0 + AUTOHIDE_AFTER / 2), None);
-        assert_eq!(autohide_decision(false, false, false, false, t0, t0 + AUTOHIDE_AFTER), Some(true));
+        assert_eq!(autohide_decision(false, false, true, false, true, t0, t0 + AUTOHIDE_AFTER * 3), None);
+        assert_eq!(autohide_decision(false, false, false, true, true, t0, t0 + AUTOHIDE_AFTER * 3), None);
+        assert_eq!(autohide_decision(false, false, false, false, true, t0, t0 + AUTOHIDE_AFTER / 2), None);
+        assert_eq!(autohide_decision(false, false, false, false, true, t0, t0 + AUTOHIDE_AFTER), Some(true));
+        // hiding only for windows: nothing over the dock keeps it up, and the last window there going brings it back
+        assert_eq!(autohide_decision(false, false, false, false, false, t0, t0 + AUTOHIDE_AFTER * 3), None, "nothing covers it");
+        assert_eq!(autohide_decision(true, false, false, false, false, t0, t0), Some(false), "the window was closed or minimised");
         // and with the setting on it reserves no band
         let mut p = prefs(true, "");
         assert!(p.reserves());

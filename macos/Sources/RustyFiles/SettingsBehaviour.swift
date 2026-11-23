@@ -31,6 +31,18 @@ extension AppSettings {
     }
 
     /// What a new tab shows: "home" (the Home page) or "current" (the folder of the tab it opens from).
+    /// Ctrl+T on Windows, ⌘T here: a new tab starts with its address bar open for typing.
+    static var newTabAddress: Bool {
+        get { flag("newTabAddress", false) }
+        set { store(newValue, "newTabAddress") }
+    }
+
+    /// Tabs show the folder's whole path in smaller text instead of its name.
+    static var tabPath: Bool {
+        get { flag("tabPath", false) }
+        set { store(newValue, "tabPath") }
+    }
+
     static var newTabOpens: String {
         get { d.string(forKey: "newTabOpens") ?? "home" }
         set { store(newValue, "newTabOpens") }
@@ -87,6 +99,12 @@ extension AppSettings {
     }
 
     /// Resting the pointer on a row selects it.
+    /// The details shown when the pointer rests on an item (size, dates, a picture's size).
+    static var hoverDetails: Bool {
+        get { flag("hoverDetails", true) }
+        set { store(newValue, "hoverDetails") }
+    }
+
     static var selectOnHover: Bool {
         get { flag("selectOnHover", false) }
         set { store(newValue, "selectOnHover") }
@@ -146,6 +164,12 @@ extension AppSettings {
         set { store(newValue, "archivesAsFolders") }
     }
 
+    /// Where an archive opened like a folder goes: "here" (this tab), "tab" or "window".
+    static var archivesOpenIn: String {
+        get { d.string(forKey: "archivesOpenIn") ?? "here" }
+        set { store(newValue, "archivesOpenIn") }
+    }
+
     static var openAfterExtract: Bool {
         get { flag("openAfterExtract", false) }
         set { store(newValue, "openAfterExtract") }
@@ -173,6 +197,49 @@ extension AppSettings {
 }
 
 // MARK: - sessions (Startup › Continue where you left off)
+
+/// Named sessions (workspace.rs `save_named_session`): a window's tabs saved under a name,
+/// opened again from the tab menu.
+@MainActor
+enum NamedSessions {
+    struct Saved: Codable {
+        var name: String
+        var tabs: [String]
+        var active: Int
+    }
+
+    private static let key = "namedSessions"
+
+    static var all: [Saved] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: key) else { return [] }
+            return (try? JSONDecoder().decode([Saved].self, from: data)) ?? []
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) { UserDefaults.standard.set(data, forKey: key) }
+        }
+    }
+
+    /// Saves (or replaces) a session of this name.
+    static func save(_ s: Saved) {
+        var list = all.filter { $0.name != s.name }
+        list.append(s)
+        all = list
+    }
+
+    static func delete(_ name: String) { all = all.filter { $0.name != name } }
+}
+
+extension AppSettings {
+    /// A session opened from the tab menu takes this window's tabs instead of a new window.
+    static var sessionsInThisWindow: Bool {
+        get { UserDefaults.standard.bool(forKey: "sessionsInThisWindow") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "sessionsInThisWindow")
+            NotificationCenter.default.post(name: .rfSettingsChanged, object: nil, userInfo: ["key": "sessionsInThisWindow"])
+        }
+    }
+}
 
 /// The windows and their tabs, saved as they change and read at the next start.
 @MainActor

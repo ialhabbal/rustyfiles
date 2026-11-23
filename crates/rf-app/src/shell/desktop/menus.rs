@@ -100,7 +100,7 @@ impl DesktopView {
             .into_iter()
             .map(|row| match row {
                 Row::Sep => Item::Separator,
-                Row::More => Item::Sub { label: t!("Diğer seçenekleri göster").into(), icon: icon(L::Ellipsis), items: Sub::Pending { key: "more", fallback: None } },
+                Row::More => Item::Sub { label: t!("Diğer seçenekleri göster").into(), icon: icon(L::Ellipsis), items: Sub::Pending { key: "more", fallback: None }, click: None },
                 Row::Cmd(cmd, enabled) => item_of(&me, cmd).enabled(enabled),
             })
             .collect();
@@ -162,6 +162,7 @@ impl DesktopView {
             redo: redo.map(str::to_string),
             has_folder: self.backend.as_ref().and_then(|b| b.target_dir()).is_some(),
             icons_forced_hidden: super::choices::hidden_by_settings(),
+            slideshow: self.slideshow_running(),
         };
         let p = crate::theme::Palette::for_window(window);
         // the chosen one of a group is marked with a dot in front (a check mark is for switches)
@@ -205,7 +206,7 @@ impl DesktopView {
             .into_iter()
             .map(|row| match row {
                 Row::Sep => Item::Separator,
-                Row::More => Item::Sub { label: t!("Daha fazla seçenek göster").into(), icon: icon(L::Ellipsis), items: Sub::Pending { key: "more", fallback: None } },
+                Row::More => Item::Sub { label: t!("Daha fazla seçenek göster").into(), icon: icon(L::Ellipsis), items: Sub::Pending { key: "more", fallback: None }, click: None },
                 Row::Cmd(cmd, enabled) => match cmd {
                     BgCmd::View => Item::sub(crate::i18n::tx("Görünüm", "View"), icon(L::LayoutGrid), view_items.clone()),
                     BgCmd::SortBy => Item::sub(t!("Sıralama ölçütü"), icon(L::ArrowUpDown), sort_items.clone()),
@@ -213,13 +214,14 @@ impl DesktopView {
                     // the read-only preview creates nothing: "New" is there but off, and the shell's own commands (which can write to the
                     // Desktop: archive, send to, templates) are not offered at all
                     BgCmd::New if read_only => Item::action(t!("Yeni"), icon(L::CirclePlus), |_, _| {}).enabled(false),
-                    BgCmd::New => Item::Sub { label: t!("Yeni").into(), icon: icon(L::CirclePlus), items: Sub::Pending { key: "new", fallback: Some(Rc::new(own_new_items(&me))) } },
+                    BgCmd::New => Item::Sub { label: t!("Yeni").into(), icon: icon(L::CirclePlus), items: Sub::Pending { key: "new", fallback: Some(Rc::new(own_new_items(&me))) }, click: None },
                     BgCmd::Paste => Item::action(t!("Yapıştır"), icon(L::ClipboardPaste), act(&me, |v, w, cx| v.paste(Via::Menu, w, cx))).hint("Ctrl+V"),
                     BgCmd::PasteShortcut => Item::action(t!("Kısayol yapıştır"), icon(L::Link), act(&me, |v, _, cx| v.paste_shortcuts(cx))),
                     BgCmd::Undo(what) => Item::action(format!("{}: {what}", t!("Geri al")), icon(L::Undo2), act(&me, |_, _, cx| crate::undo::undo(cx))).hint("Ctrl+Z"),
                     BgCmd::Redo(what) => Item::action(format!("{}: {what}", t!("Yinele")), icon(L::Redo2), act(&me, |_, _, cx| crate::undo::redo(cx))).hint("Ctrl+Y"),
                     BgCmd::OpenTerminal => Item::action(t!("Terminalde Aç"), icon(L::SquareTerminal), act(&me, |v, _, _| v.open_terminal_here())),
                     BgCmd::DisplaySettings => Item::action(t!("Görüntü ayarları"), icon(L::Monitor), act(&me, |v, _, _| v.open_settings_page("ms-settings:display"))),
+                    BgCmd::NextBackground => Item::action(t!("Sonraki masaüstü arka planı"), icon(L::SkipForward), act(&me, |v, _, _| v.next_background())),
                     BgCmd::Personalize => Item::action(t!("Kişiselleştir"), icon(L::Palette), act(&me, |v, _, _| v.open_settings_page("ms-settings:personalization"))),
                     // (not at the top level: see `more_prefix`)
                     BgCmd::OpenInRustyfiles => own_more_item(&me, BgCmd::OpenInRustyfiles),
@@ -392,7 +394,7 @@ fn to_items(me: &Me, session: u64, items: &[ShellItem], cx: &mut App) -> Vec<Ite
             }
             let icon = it.icon.as_ref().and_then(|i| fluent_menu::shell_icon(i, cx)).map(MenuIcon::Image).unwrap_or(MenuIcon::None);
             if !it.children.is_empty() {
-                return Item::Sub { label: it.label.clone().into(), icon, items: Sub::Items(Rc::new(to_items(me, session, &tidy(it.children.clone()), cx))) };
+                return Item::Sub { label: it.label.clone().into(), icon, items: Sub::Items(Rc::new(to_items(me, session, &tidy(it.children.clone()), cx))), click: None };
             }
             let (id, me) = (it.id, me.clone());
             let mut item = Item::action(it.label.clone(), icon, move |_, cx| invoke_shell(&me, session, id, cx)).enabled(it.enabled);
