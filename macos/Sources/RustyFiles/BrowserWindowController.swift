@@ -34,6 +34,8 @@ final class BrowserTab {
     var isPage: Bool { isSettings || isHome || diskRoot != nil }
     /// A tag's results (rustyfiles:tag/<name>): the files that have it, from anywhere.
     var tagName: String? { TagStore.name(of: url) }
+    /// A Finder smart folder shown here (rustyfiles:smart/<file>).
+    var smartFolder: URL? { SmartFolder.file(of: url) }
 
     /// A search (rustyfiles:search?root=…&q=…, Location::Search on Windows): names matching
     /// `query` in `root` and every folder under it.
@@ -72,6 +74,7 @@ final class BrowserTab {
         if isSettings { return TabInfo(title: String(localized: "Settings"), icon: "settings") }
         if isHome { return TabInfo(title: String(localized: "Home"), icon: "house") }
         if let tag = tagName { return TabInfo(title: tag, icon: "tag") }
+        if let s = smartFolder { return TabInfo(title: s.deletingPathExtension().lastPathComponent, icon: "folder-search") }
         if let s = searchSpec { return TabInfo(title: "“\(s.query)”", icon: "search") }
         if let r = diskRoot { return TabInfo(title: String(localized: "Disk usage — \(FileManager.default.displayName(atPath: r.path))"), icon: "chart-pie") }
         let fm = FileManager.default
@@ -140,6 +143,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private let navBar = NavBarView()
     private let sidebar = SidebarView()
     private let handle = SidebarResizeHandle()
+    private let paneDivider = PaneDivider()
+    private var lastPaneArea: NSRect = .zero
+    /// The left pane's share of a dual pane's width, kept across starts (0.5: half each).
+    private var paneShare: CGFloat = {
+        let v = UserDefaults.standard.double(forKey: "paneShare")
+        return v > 0.1 && v < 0.9 ? v : 0.5
+    }()
     /// The left (or only) pane, and the right one of a dual pane.
     let leftList = FileListController()
     let rightList = FileListController()
@@ -202,7 +212,17 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         window.contentView = frame
         applyMaterial()
         applyScale()
-        [sidebar, handle, leftList.card, rightList.card, navBar, titleBar].forEach(root.addSubview)
+        [sidebar, handle, leftList.card, rightList.card, paneDivider, navBar, titleBar].forEach(root.addSubview)
+        paneDivider.onDrag = { [weak self] x in
+            guard let self else { return }
+            if let x, self.lastPaneArea.width > 0 {
+                self.paneShare = min(max((x - self.lastPaneArea.minX - 3) / (self.lastPaneArea.width - 6), 0.15), 0.85)
+            } else {
+                self.paneShare = 0.5
+            }
+            UserDefaults.standard.set(Double(self.paneShare), forKey: "paneShare")
+            self.root.needsLayout = true
+        }
         rightList.card.isHidden = true
         root.onLayout = { [weak self] in self?.layoutRoot() }
 
@@ -242,11 +262,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         let left = sidebarShown ? sw : 8
         let area = NSRect(x: left, y: top, width: b.width - left - Metrics.cardRightMargin, height: b.height - top - Metrics.bottomSpacer)
         rightList.card.isHidden = !dual
+        paneDivider.isHidden = !dual
         if dual {
-            // two cards side by side, 6 apart (workspace.rs dual pane)
-            let w = floor((area.width - 6) / 2)
+            // two cards side by side, 6 apart (workspace.rs dual pane); the gap moves the split
+            let w = floor(min(max((area.width - 6) * paneShare, 240), area.width - 6 - 240))
             leftList.card.frame = NSRect(x: area.minX, y: area.minY, width: w, height: area.height)
             rightList.card.frame = NSRect(x: area.minX + w + 6, y: area.minY, width: area.width - w - 6, height: area.height)
+            paneDivider.frame = NSRect(x: area.minX + w, y: area.minY, width: 6, height: area.height)
+            lastPaneArea = area
         } else {
             leftList.card.frame = area
         }
@@ -818,7 +841,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
             }
             let began = Date()
             let result: Result<Folder, Error>
-            if let tag = TagStore.name(of: url) {
+            if let smart = SmartFolder.file(of: url) {
+                let paths = SmartFolder.results(smart)
+                result = .success(Folder.gathered(label: url.absoluteString, paths: paths, column: column, ascending: ascending, foldersFirst: first, showHidden: hidden))
+            } else if let tag = TagStore.name(of: url) {
                 let paths = TagStore.files(tagged: tag)
                 result = .success(Folder.gathered(label: url.absoluteString, paths: paths, column: column, ascending: ascending, foldersFirst: first, showHidden: hidden))
             } else {
@@ -1004,13 +1030,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
     private func updateChrome() {
         navBar.back.isEnabled = !tab.back.isEmpty
         navBar.forward.isEnabled = !tab.forward.isEmpty
-        navBar.up.isEnabled = !tab.isHome && (tab.isSettings || tab.tagName != nil || tab.searchSpec != nil || tab.diskRoot != nil || tab.url.path != "/")
+        navBar.up.isEnabled = !tab.isHome && (tab.isSettings || tab.tagName != nil || tab.smartFolder != nil || tab.searchSpec != nil || tab.diskRoot != nil || tab.url.path != "/")
         if tab.isSettings {
             navBar.omnibar.breadcrumb.segments = [BreadcrumbView.Segment(title: String(localized: "Settings"), url: BrowserTab.settingsURL)]
         } else if tab.isHome {
             navBar.omnibar.breadcrumb.segments = [BreadcrumbView.Segment(title: String(localized: "Home"), url: BrowserTab.homeURL)]
         } else if let tag = tab.tagName {
             navBar.omnibar.breadcrumb.segments = [BreadcrumbView.Segment(title: String(localized: "Tags"), url: BrowserTab.homeURL), BreadcrumbView.Segment(title: tag, url: tab.url)]
+        } else if let s = tab.smartFolder {
+            navBar.omnibar.breadcrumb.segments = BreadcrumbView.segments(for: s.deletingLastPathComponent()) + [BreadcrumbView.Segment(title: s.deletingPathExtension().lastPathComponent, url: tab.url)]
         } else if let r = tab.diskRoot {
             navBar.omnibar.breadcrumb.segments = BreadcrumbView.segments(for: r) + [BreadcrumbView.Segment(title: String(localized: "Disk usage"), url: tab.url)]
         } else if let s = tab.searchSpec {
@@ -1088,6 +1116,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate, NSMen
         if tab.isSettings { return goHome(sender) }
         if tab.isHome { return }
         if tab.tagName != nil { return goHome(sender) }
+        if let s = tab.smartFolder { return navigate(to: s.deletingLastPathComponent(), selecting: s.lastPathComponent) }
         // a search goes up to the folder it searched
         if let s = tab.searchSpec { return navigate(to: s.root) }
         if let r = tab.diskRoot { return navigate(to: r) }
